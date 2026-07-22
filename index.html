@@ -3814,7 +3814,8 @@ function App() {
   }), view === "progress" && /*#__PURE__*/React.createElement(ProgressView, {
     rollups: rollups,
     state: state,
-    activeIso: activeIso
+    activeIso: activeIso,
+    todayIso: todayIso
   }), view === "tuning" && /*#__PURE__*/React.createElement(TuningView, {
     state: state,
     engine: engine,
@@ -4818,9 +4819,23 @@ function SeasonView({
 function ProgressView({
   rollups,
   state,
-  activeIso
+  activeIso,
+  todayIso
 }) {
-  const cutoff = activeIso;
+  /* Progress must cover the season to date, not merely the day that happens to
+     be selected in Today. Bounding this by activeIso made the view truncate:
+     work logged after the selected day disappeared until you navigated forward.
+     Cover everything up to today, extending past it only if a later day already
+     holds logged data (e.g. a session recorded ahead of time). */
+  const lastLogged = useMemo(() => {
+    let last = "";
+    ALL_DAYS.forEach(d => {
+      const r = rollups[d.d];
+      if (r && (r.sessions && r.sessions.length > 0 || r.intake > 0)) last = d.d;
+    });
+    return last;
+  }, [rollups]);
+  const cutoff = [todayIso, lastLogged].filter(Boolean).sort().pop() || activeIso;
   let cP = 0,
     cA = 0,
     cPK = 0,
@@ -5014,7 +5029,7 @@ function ProgressView({
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "CUMULATIVE CALORIES BURNED (SESSIONS ONLY)"), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Session calories, not counting BMR \u2014 so this compares like-for-like with the plan."), /*#__PURE__*/React.createElement("div", {
+  }, "Session calories ", /*#__PURE__*/React.createElement("b", null, "burned in training"), ", not counting BMR \u2014 so this compares like-for-like with the plan. It covers ", /*#__PURE__*/React.createElement("b", null, "every day"), " of the season so far, which is why it will not match the intake totals below: those count only the days you logged food."), /*#__PURE__*/React.createElement("div", {
     className: "h-56 mt-3"
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
     width: "100%",
@@ -5061,13 +5076,13 @@ function ProgressView({
     className: "text-xs text-gray-500"
   }, daysWithFood, " day", daysWithFood !== 1 ? "s" : "", " of food logged")), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Total burn = BMR + all logged sessions. Negative balance on a day = deficit (weight-loss direction). This chart only includes days where food was logged, so the intake line rises in steps."), daysWithFood > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "Total burn = BMR + all logged sessions. Negative balance on a day = deficit (weight-loss direction). Everything in this card is restricted to the days you logged food, so intake and burn stay like-for-like; the intake line rises in steps as a result. These totals are deliberately not comparable with the calories-burned chart above, which spans every day."), daysWithFood > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-2 md:grid-cols-4 gap-4 mt-4",
     style: mono
   }, /*#__PURE__*/React.createElement(KPI, {
     label: "Cum. intake",
     value: cIntake.toLocaleString(),
-    sub: `across ${daysWithFood} day${daysWithFood !== 1 ? "s" : ""}`,
+    sub: `food-logged days only (${daysWithFood})`,
     color: "#B35F1E"
   }), /*#__PURE__*/React.createElement(KPI, {
     label: "Cum. burn (same days)",
