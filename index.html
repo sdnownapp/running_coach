@@ -2646,7 +2646,25 @@ const timeStrToSec = str => {
   return null;
 };
 const num = v => {
-  const n = parseFloat(v);
+  let s = v;
+  if (typeof s === "string") {
+    s = s.trim();
+    const hasDot = s.indexOf(".") >= 0;
+    const hasComma = s.indexOf(",") >= 0;
+    if (hasDot && hasComma) {
+      // Both present: the rightmost separator is the decimal, the other is a
+      // thousands separator. Strip the thousands one, normalise decimal to ".".
+      if (s.lastIndexOf(",") > s.lastIndexOf(".")) {
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        s = s.replace(/,/g, "");
+      }
+    } else if (hasComma) {
+      // Lone comma = decimal separator (e.g. "105,3" -> "105.3").
+      s = s.replace(",", ".");
+    }
+  }
+  const n = parseFloat(s);
   return isFinite(n) ? n : 0;
 };
 const phaseColor = ph => {
@@ -4896,16 +4914,23 @@ function ProgressView({
     }
   });
   const weeklyCum = PLAN.weeks.map(w => {
-    const lastIso = w.days[6].d;
-    const point = series.find(x => x.d === lastIso);
+    /* Grey (plan) line = the full planned trajectory, so sample it at the
+       week's final day. Dark (actual) line = what's actually banked so far, so
+       sample it at the latest day of the week that has already elapsed
+       (<= cutoff). Sampling actuals at the week-ending day dropped the current,
+       in-progress week to null — early in the season that emptied the entire
+       actual line, making the progress charts look like nothing had happened. */
+    const endPoint = series.find(x => x.d === w.days[6].d);
+    const elapsed = w.days.filter(d => d.d <= cutoff);
+    const actPoint = elapsed.length ? series.find(x => x.d === elapsed[elapsed.length - 1].d) : null;
     return {
       wk: w.n,
-      plan: point.plan,
-      actual: point.act,
-      planK: point.planK,
-      actualK: point.actK,
-      intake: point.intake,
-      burn: point.burn
+      plan: endPoint.plan,
+      planK: endPoint.planK,
+      actual: actPoint ? actPoint.act : null,
+      actualK: actPoint ? actPoint.actK : null,
+      intake: actPoint ? actPoint.intake : null,
+      burn: actPoint ? actPoint.burn : null
     };
   });
   const pct = (a, p) => p > 0 ? Math.round(100 * a / p) : 0;
