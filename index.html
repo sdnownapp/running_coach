@@ -2754,6 +2754,13 @@ const ACTIVITIES = {
     defaultRPE: 2,
     wantsDist: true
   },
+  hiking: {
+    label: "Hiking",
+    hi: false,
+    metByRPE: [4.0, 4.5, 5.3, 6.0, 6.5, 7.3, 8.0, 8.8, 9.5, 10.3],
+    defaultRPE: 4,
+    wantsDist: true
+  },
   swim: {
     label: "Swim",
     hi: false,
@@ -2767,6 +2774,13 @@ const ACTIVITIES = {
     met: 6.0,
     defaultRPE: 4,
     wantsDist: false
+  },
+  ski_touring: {
+    label: "Ski touring",
+    hi: true,
+    metByRPE: [6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+    defaultRPE: 6,
+    wantsDist: true
   },
   strength: {
     label: "Strength",
@@ -2798,8 +2812,10 @@ const ACT_COLOR = {
   bike_sport: "#3E5C8A",
   bike_commute: "#8AA0BE",
   walk: "#7A9A6F",
+  hiking: "#6B8E23",
   swim: "#3B7E9E",
   ski: "#5A6B8A",
+  ski_touring: "#7C5CBF",
   strength: "#8B7AA1",
   rest_walk: "#A0A6A0",
   other: "#B7BCC7"
@@ -2837,7 +2853,10 @@ function plannedSession(day) {
   if (k === "rest" || k === "travel") return null;
   if (k === "ski") return {
     type: "ski",
-    dur: 300,
+    // A resort ski day is mostly lifts, standing, and gravity-assisted
+    // descents, not continuous exertion. Count a planned "5 h ski" as ~2.5 h of
+    // effective activity, halving the planned effort and calories accordingly.
+    dur: 150,
     dist: 0,
     rpe: 4
   };
@@ -4594,11 +4613,28 @@ function SeasonView({
       })()
     };
   });
-  const wCh = ALL_DAYS.filter(d => num(state.logs[d.d]?.morning?.weight) > 40).map(d => ({
-    d: d.d.slice(5),
+  const wRaw = ALL_DAYS.filter(d => num(state.logs[d.d]?.morning?.weight) > 40).map(d => ({
+    iso: d.d,
     actual: num(state.logs[d.d].morning.weight),
     target: +targetWeight(d.d).toFixed(1)
   }));
+  /* 7-day moving average over the trailing 7 CALENDAR days (not 7 weigh-ins),
+     so gaps in logging don't stretch the window. Averages whatever weigh-ins
+     fall in [day-6, day], smoothing out daily water-weight noise. */
+  const wCh = wRaw.map(pt => {
+    const end = +fromIso(pt.iso),
+      start = end - 6 * DAY;
+    const win = wRaw.filter(p => {
+      const t = +fromIso(p.iso);
+      return t >= start && t <= end;
+    });
+    return {
+      d: pt.iso.slice(5),
+      actual: pt.actual,
+      target: pt.target,
+      trend: +(win.reduce((a, p) => a + p.actual, 0) / win.length).toFixed(1)
+    };
+  });
   const rhrCh = ALL_DAYS.filter(d => num(state.logs[d.d]?.morning?.rhr) > 25).map(d => ({
     d: d.d.slice(5),
     rhr: num(state.logs[d.d].morning.rhr)
@@ -4778,7 +4814,11 @@ function SeasonView({
       fontFamily: "monospace"
     },
     width: 34
-  }), /*#__PURE__*/React.createElement(Tooltip, null), /*#__PURE__*/React.createElement(Line, {
+  }), /*#__PURE__*/React.createElement(Tooltip, null), /*#__PURE__*/React.createElement(Legend, {
+    wrapperStyle: {
+      fontSize: 11
+    }
+  }), /*#__PURE__*/React.createElement(Line, {
     type: "monotone",
     dataKey: "target",
     stroke: "#9AA6A0",
@@ -4788,12 +4828,19 @@ function SeasonView({
   }), /*#__PURE__*/React.createElement(Line, {
     type: "monotone",
     dataKey: "actual",
-    stroke: "#1C2321",
-    strokeWidth: 2,
+    stroke: "#B9C0BC",
+    strokeWidth: 1.5,
     dot: {
-      r: 2
+      r: 1.5
     },
-    name: "actual"
+    name: "daily"
+  }), /*#__PURE__*/React.createElement(Line, {
+    type: "monotone",
+    dataKey: "trend",
+    stroke: "#1C2321",
+    strokeWidth: 2.5,
+    dot: false,
+    name: "7-day avg"
   }))) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log your morning weight and the glide path appears here."
   }))), /*#__PURE__*/React.createElement(Card, {
