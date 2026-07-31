@@ -4182,6 +4182,13 @@ function FoodCard({
   const intake = num(food?.total);
   const burn = dayR.totalBurn;
   const balance = intake > 0 ? intake - burn : null;
+  const macroTot = (food?.items || []).reduce((a, it) => ({
+    c: a.c + Math.max(0, num(it.carbs)),
+    p: a.p + Math.max(0, num(it.protein)),
+    f: a.f + Math.max(0, num(it.fat))
+  }), { c: 0, p: 0, f: 0 });
+  const macroHas = macroTot.c + macroTot.p + macroTot.f > 0;
+  const macroKc = macroTot.c * 4 + macroTot.p * 4 + macroTot.f * 9;
   return /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement("div", {
@@ -4348,7 +4355,10 @@ function FoodCard({
   }, it.name), it.qty && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500",
     style: mono
-  }, it.qty)), /*#__PURE__*/React.createElement("select", {
+  }, it.qty), (num(it.carbs) || num(it.protein) || num(it.fat)) ? /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-gray-400",
+    style: mono
+  }, "C " + Math.round(num(it.carbs)) + " \u00b7 P " + Math.round(num(it.protein)) + " \u00b7 F " + Math.round(num(it.fat)) + " g") : null), /*#__PURE__*/React.createElement("select", {
     value: normMeal(it.meal),
     onChange: e => setItemMeal(i, e.target.value),
     className: "px-1 py-1 rounded border text-xs",
@@ -4413,7 +4423,36 @@ function FoodCard({
     }
   }, balance == null ? "—" : `${balance > 0 ? "+" : ""}${balance.toLocaleString()}`), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-400"
-  }, balance == null ? "log food to see" : balance < 0 ? "deficit (weight loss)" : "surplus (weight gain)"))), intake > 0 && /*#__PURE__*/React.createElement("div", {
+  }, balance == null ? "log food to see" : balance < 0 ? "deficit (weight loss)" : "surplus (weight gain)"))), macroHas ? /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 pt-3 border-t",
+    style: {
+      borderColor: "#F1F2EE"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs uppercase tracking-widest text-gray-500 mb-2",
+    style: mono
+  }, "Macros \u00b7 approx"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-3",
+    style: mono
+  }, [["Carbs", macroTot.c, 4, "#3B7E9E"], ["Protein", macroTot.p, 4, "#B3524A"], ["Fat", macroTot.f, 9, "#D8A461"]].map(function (row) {
+    return /*#__PURE__*/React.createElement("div", {
+      key: row[0]
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "text-xs uppercase tracking-widest text-gray-500"
+    }, row[0]), /*#__PURE__*/React.createElement("div", {
+      className: "text-lg font-bold",
+      style: {
+        color: row[3]
+      }
+    }, Math.round(row[1]) + " g"), /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-gray-400"
+    }, macroKc ? Math.round(row[1] * row[2] / macroKc * 100) + "% of kcal" : "\u2014"));
+  }))) : intake > 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 pt-3 border-t text-xs text-gray-400 italic",
+    style: {
+      borderColor: "#F1F2EE"
+    }
+  }, "No macro estimate for this day \u2014 re-parse the food above (with an API key set) to add carbs / protein / fat.") : null, intake > 0 && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-4 mt-3 pt-3 border-t flex-wrap",
     style: {
       borderColor: "#F1F2EE"
@@ -5795,17 +5834,19 @@ function MacroSummary({
 }) {
   const M = [{
     key: "carbs",
-    color: "#3B7E9E",
-    kcalG: 4
+    gkey: "carbsG",
+    color: "#3B7E9E"
   }, {
     key: "protein",
-    color: "#B3524A",
-    kcalG: 4
+    gkey: "proteinG",
+    color: "#B3524A"
   }, {
     key: "fat",
-    color: "#D8A461",
-    kcalG: 9
+    gkey: "fatG",
+    color: "#D8A461"
   }];
+  const [gran, setGran] = useState("day");
+  const [metric, setMetric] = useState("pct");
   const sumG = {
     carbs: 0,
     protein: 0,
@@ -5819,7 +5860,8 @@ function MacroSummary({
   let grandKc = 0,
     fdays = 0,
     covered = 0;
-  const rows = [];
+  const daily = [];
+  const byIso = {};
   ALL_DAYS.forEach(dd => {
     if (dd.d > cutoff) return;
     const f = rollups[dd.d] && rollups[dd.d].food;
@@ -5830,17 +5872,17 @@ function MacroSummary({
       protein: 0,
       fat: 0
     };
-    let hasMacro = false;
+    let has = false;
     f.items.forEach(it => {
       const c = num(it.carbs),
         p = num(it.protein),
         ft = num(it.fat);
-      if (c || p || ft) hasMacro = true;
+      if (c || p || ft) has = true;
       g.carbs += Math.max(0, c);
       g.protein += Math.max(0, p);
       g.fat += Math.max(0, ft);
     });
-    if (!hasMacro) return; // day predates the macro upgrade / not re-parsed
+    if (!has) return;
     covered++;
     const kc = {
       carbs: g.carbs * 4,
@@ -5849,7 +5891,8 @@ function MacroSummary({
     };
     const tot = kc.carbs + kc.protein + kc.fat;
     const row = {
-      d: dd.d.slice(5),
+      iso: dd.d,
+      label: dd.d.slice(5),
       carbsG: Math.round(g.carbs),
       proteinG: Math.round(g.protein),
       fatG: Math.round(g.fat)
@@ -5860,11 +5903,52 @@ function MacroSummary({
       sumKc[m.key] += kc[m.key];
     });
     grandKc += tot;
-    rows.push(row);
+    daily.push(row);
+    byIso[dd.d] = g;
+  });
+  const weekly = [];
+  PLAN.weeks.forEach(w => {
+    if (w.days[0].d > cutoff) return;
+    const gs = w.days.map(dd => byIso[dd.d]).filter(Boolean);
+    if (!gs.length) return;
+    const n = gs.length;
+    const avg = {
+      carbs: gs.reduce((a, x) => a + x.carbs, 0) / n,
+      protein: gs.reduce((a, x) => a + x.protein, 0) / n,
+      fat: gs.reduce((a, x) => a + x.fat, 0) / n
+    };
+    const kc = {
+      carbs: avg.carbs * 4,
+      protein: avg.protein * 4,
+      fat: avg.fat * 9
+    };
+    const tot = kc.carbs + kc.protein + kc.fat;
+    const row = {
+      label: "W" + w.n,
+      carbsG: Math.round(avg.carbs),
+      proteinG: Math.round(avg.protein),
+      fatG: Math.round(avg.fat)
+    };
+    M.forEach(m => {
+      row[m.key] = tot ? +(kc[m.key] / tot * 100).toFixed(1) : 0;
+    });
+    weekly.push(row);
   });
   const avgG = k => covered ? Math.round(sumG[k] / covered) : 0;
   const avgPct = k => grandKc ? Math.round(sumKc[k] / grandKc * 100) : 0;
-  const anyData = rows.length > 0;
+  const anyData = daily.length > 0;
+  const data = gran === "week" ? weekly : daily;
+  const isG = metric === "g";
+  const btn = (active, label, onClick) => /*#__PURE__*/React.createElement("button", {
+    onClick: onClick,
+    className: "px-2 py-1 rounded text-xs",
+    style: {
+      ...mono,
+      border: "1px solid #D6DAD2",
+      background: active ? "#1C2321" : "#fff",
+      color: active ? "#fff" : "#1C2321"
+    }
+  }, label);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "flex items-baseline justify-between flex-wrap gap-3"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "MACRONUTRIENT SPLIT (CARBS / PROTEIN / FAT)"), /*#__PURE__*/React.createElement("span", {
@@ -5872,7 +5956,13 @@ function MacroSummary({
     className: "text-xs text-gray-500"
   }, `macros on ${covered}/${fdays} food days`)), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Approximate grams and calorie-share of carbohydrate, protein and fat per day, averaged over the period. Estimates come from the food parser, so they exist only for days parsed after this upgrade \u2014 re-parse a day's food on the Food tab to add macros to it. Grams are rough (portion assumptions), best read as proportions and trends, not exact figures."), anyData ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "Approximate carbohydrate, protein and fat per day \u2014 as grams or as a share of calories, viewed by day or averaged by week. Estimates come from the food parser, so they exist only for days parsed after this upgrade; re-parse a day's food on the Food tab to add macros. Grams are rough, best read as proportions and trends."), anyData ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-4 flex-wrap mt-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1"
+  }, btn(gran === "day", "By day", () => setGran("day")), btn(gran === "week", "By week", () => setGran("week"))), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1"
+  }, btn(metric === "pct", "% of kcal", () => setMetric("pct")), btn(metric === "g", "Grams", () => setMetric("g")))), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-3 gap-3 mt-4",
     style: mono
   }, M.map(m => /*#__PURE__*/React.createElement(KPI, {
@@ -5887,30 +5977,27 @@ function MacroSummary({
     width: "100%",
     height: "100%"
   }, /*#__PURE__*/React.createElement(AreaChart, {
-    data: rows
+    data: data
   }, /*#__PURE__*/React.createElement(CartesianGrid, {
     stroke: "#EDEFE9"
   }), /*#__PURE__*/React.createElement(XAxis, {
-    dataKey: "d",
+    dataKey: "label",
     tick: {
       fontSize: 10,
       fontFamily: "monospace"
     },
     interval: "preserveStartEnd",
-    minTickGap: 24
+    minTickGap: 20
   }), /*#__PURE__*/React.createElement(YAxis, {
     tick: {
       fontSize: 10,
       fontFamily: "monospace"
     },
     width: 40,
-    domain: [0, 100],
-    tickFormatter: v => v + "%"
+    domain: isG ? [0, "auto"] : [0, 100],
+    tickFormatter: v => isG ? v : v + "%"
   }), /*#__PURE__*/React.createElement(Tooltip, {
-    formatter: (v, n, p) => {
-      const g = p && p.payload ? p.payload[n + "G"] : null;
-      return [`${Math.round(v)}%${g != null ? ` (\u2248${g} g)` : ""}`, n];
-    }
+    formatter: (v, n) => isG ? [Math.round(v) + " g", n] : [Math.round(v) + "%", n]
   }), /*#__PURE__*/React.createElement(Legend, {
     wrapperStyle: {
       fontSize: 11
@@ -5918,7 +6005,7 @@ function MacroSummary({
   }), M.map(m => /*#__PURE__*/React.createElement(Area, {
     key: m.key,
     type: "monotone",
-    dataKey: m.key,
+    dataKey: isG ? m.gkey : m.key,
     stackId: "macro",
     stroke: m.color,
     fill: m.color,
@@ -5926,7 +6013,7 @@ function MacroSummary({
     name: m.key
   }))))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Bands show each macro's share of calories per day (hover for approximate grams). A common endurance-in-a-deficit aim is protein high enough to protect muscle, with carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
+  }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each band is that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "No macro data yet. Re-parse a day's food on the Food tab (with an API key set) and its carbs/protein/fat will appear here."
   }));
 }
