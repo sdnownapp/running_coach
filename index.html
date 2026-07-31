@@ -3789,7 +3789,20 @@ function App() {
       energy: v
     }),
     w: "w-full"
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 mt-3 text-sm cursor-pointer select-none",
+    style: mono
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!log.morning.mountain,
+    onChange: e => setMorning(activeIso, {
+      mountain: e.target.checked
+    }),
+    className: "w-4 h-4",
+    style: {
+      accentColor: "#6C4AB6"
+    }
+  }), /*#__PURE__*/React.createElement("span", null, "Mountain night \u2014 at altitude (RHR typically runs higher)")), /*#__PURE__*/React.createElement("div", {
     className: "mt-3 text-xs text-gray-600 leading-relaxed"
   }, ready.reasons.length ? ready.reasons.join("; ") + "." : ready.base ? `All clear. RHR baseline ${ready.base} bpm.` : "Log RHR on 3+ mornings to activate the readiness engine.")), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
@@ -4679,10 +4692,30 @@ function SeasonView({
       trend: +(win.reduce((a, p) => a + p.actual, 0) / win.length).toFixed(1)
     };
   });
-  const rhrCh = ALL_DAYS.filter(d => num(state.logs[d.d]?.morning?.rhr) > 25).map(d => ({
+  const rhrRaw = ALL_DAYS.filter(d => num(state.logs[d.d]?.morning?.rhr) > 25).map(d => ({
+    iso: d.d,
     d: d.d.slice(5),
-    rhr: num(state.logs[d.d].morning.rhr)
+    rhr: num(state.logs[d.d].morning.rhr),
+    mountain: !!state.logs[d.d].morning.mountain
   }));
+  /* 7-day trailing average over SEA-LEVEL nights only: mountain nights run
+     higher at altitude, so folding them into the baseline would fake a fitness
+     decline. Mountain readings are still plotted, just highlighted separately. */
+  const rhrCh = rhrRaw.map(pt => {
+    const end = +fromIso(pt.iso),
+      start = end - 6 * DAY;
+    const win = rhrRaw.filter(p => {
+      if (p.mountain) return false;
+      const t = +fromIso(p.iso);
+      return t >= start && t <= end;
+    });
+    return {
+      d: pt.d,
+      rhr: pt.rhr,
+      mountain: pt.mountain ? pt.rhr : null,
+      trend: win.length ? +(win.reduce((a, p) => a + p.rhr, 0) / win.length).toFixed(1) : null
+    };
+  });
   return /*#__PURE__*/React.createElement("div", {
     className: "grid md:grid-cols-2 gap-4"
   }, /*#__PURE__*/React.createElement(Card, {
@@ -4911,14 +4944,40 @@ function SeasonView({
       fontFamily: "monospace"
     },
     width: 30
-  }), /*#__PURE__*/React.createElement(Tooltip, null), /*#__PURE__*/React.createElement(Line, {
+  }), /*#__PURE__*/React.createElement(Tooltip, null), /*#__PURE__*/React.createElement(Legend, {
+    wrapperStyle: {
+      fontSize: 11
+    }
+  }), /*#__PURE__*/React.createElement(Line, {
     type: "monotone",
     dataKey: "rhr",
-    stroke: "#2A567E",
-    strokeWidth: 2,
+    stroke: "#B9C0BC",
+    strokeWidth: 1.5,
     dot: {
-      r: 2
-    }
+      r: 1.5
+    },
+    name: "daily"
+  }), /*#__PURE__*/React.createElement(Line, {
+    type: "monotone",
+    dataKey: "trend",
+    stroke: "#1C2321",
+    strokeWidth: 2.5,
+    dot: false,
+    connectNulls: true,
+    name: "7-day avg (sea level)"
+  }), /*#__PURE__*/React.createElement(Line, {
+    type: "monotone",
+    dataKey: "mountain",
+    stroke: "#6C4AB6",
+    strokeWidth: 0,
+    connectNulls: false,
+    dot: {
+      r: 4,
+      fill: "#6C4AB6",
+      stroke: "#fff",
+      strokeWidth: 1
+    },
+    name: "mountain night"
   }))) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log RHR on waking \u2014 cheapest fitness and fatigue signal."
   }))));
@@ -5813,16 +5872,47 @@ function MealRatioTrend({
     wrapperStyle: {
       fontSize: 11
     }
-  }), cats.map(c => /*#__PURE__*/React.createElement(Area, {
-    key: c.key,
+  }), /*#__PURE__*/React.createElement(Area, {
     type: "monotone",
-    dataKey: c.key,
+    dataKey: "breakfast",
     stackId: "meal",
-    stroke: c.color,
-    fill: c.color,
+    stroke: "#E0A458",
+    fill: "#E0A458",
     fillOpacity: 0.8,
-    name: c.key
-  }))))), /*#__PURE__*/React.createElement("div", {
+    name: "breakfast"
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "lunch",
+    stackId: "meal",
+    stroke: "#6E8B3D",
+    fill: "#6E8B3D",
+    fillOpacity: 0.8,
+    name: "lunch"
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "dinner",
+    stackId: "meal",
+    stroke: "#3B5670",
+    fill: "#3B5670",
+    fillOpacity: 0.8,
+    name: "dinner"
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "snack",
+    stackId: "meal",
+    stroke: "#A6759B",
+    fill: "#A6759B",
+    fillOpacity: 0.8,
+    name: "snack"
+  }), hasUntagged ? /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "untagged",
+    stackId: "meal",
+    stroke: "#C4CBC6",
+    fill: "#C4CBC6",
+    fillOpacity: 0.8,
+    name: "untagged"
+  }) : null))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
   }, "Each band is that meal's share of the day's calories. A dinner band that swells over time, for instance, means your intake is drifting later in the day.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log food with meal tags and the composition trend appears here."
@@ -5939,6 +6029,7 @@ function MacroSummary({
   const anyData = daily.length > 0;
   const data = gran === "week" ? weekly : daily;
   const isG = metric === "g";
+  const showDots = data.length <= 12;
   const btn = (active, label, onClick) => /*#__PURE__*/React.createElement("button", {
     onClick: onClick,
     className: "px-2 py-1 rounded text-xs",
@@ -6002,16 +6093,40 @@ function MacroSummary({
     wrapperStyle: {
       fontSize: 11
     }
-  }), M.map(m => /*#__PURE__*/React.createElement(Area, {
-    key: m.key,
+  }), /*#__PURE__*/React.createElement(Area, {
     type: "monotone",
-    dataKey: isG ? m.gkey : m.key,
+    dataKey: isG ? "carbsG" : "carbs",
     stackId: "macro",
-    stroke: m.color,
-    fill: m.color,
+    stroke: "#3B7E9E",
+    fill: "#3B7E9E",
     fillOpacity: 0.8,
-    name: m.key
-  }))))), /*#__PURE__*/React.createElement("div", {
+    dot: showDots ? {
+      r: 2
+    } : false,
+    name: "carbs"
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: isG ? "proteinG" : "protein",
+    stackId: "macro",
+    stroke: "#B3524A",
+    fill: "#B3524A",
+    fillOpacity: 0.8,
+    dot: showDots ? {
+      r: 2
+    } : false,
+    name: "protein"
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: isG ? "fatG" : "fat",
+    stackId: "macro",
+    stroke: "#D8A461",
+    fill: "#D8A461",
+    fillOpacity: 0.8,
+    dot: showDots ? {
+      r: 2
+    } : false,
+    name: "fat"
+  })))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
   }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each band is that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "No macro data yet. Re-parse a day's food on the Food tab (with an API key set) and its carbs/protein/fat will appear here."
