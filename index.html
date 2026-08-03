@@ -3239,6 +3239,55 @@ const KPI = ({
 }, sub));
 
 /* ================= main app ================= */
+function pruneState(s) {
+  if (!s || !s.logs) return {
+    state: s,
+    changed: false
+  };
+  let changed = false;
+  const logs = {};
+  Object.keys(s.logs).forEach(iso => {
+    const d = s.logs[iso] || {};
+    const m0 = d.morning || {};
+    const m = {};
+    Object.keys(m0).forEach(k => {
+      const v = m0[k];
+      if (v === "" || v == null) {
+        changed = true;
+        return;
+      }
+      if (k === "mountain" && !v) {
+        changed = true;
+        return;
+      }
+      m[k] = v;
+    });
+    const sessions = d.sessions || [];
+    const f = d.food;
+    const hasFood = !!f && (num(f.total) > 0 || (f.items || []).length > 0);
+    const hasNotes = !!(d.notes && String(d.notes).trim());
+    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes) {
+      changed = true;
+      return; // drop the fully-empty day entirely
+    }
+    const nd = {
+      ...d,
+      morning: m
+    };
+    if (f && !hasFood) {
+      nd.food = null;
+      changed = true;
+    } // strip empty food shell
+    logs[iso] = nd;
+  });
+  return {
+    state: {
+      ...s,
+      logs
+    },
+    changed
+  };
+}
 function App() {
   const [state, setState] = useState(null);
   const [view, setView] = useState("today");
@@ -3253,7 +3302,11 @@ function App() {
   }, []);
   const activeIso = selIso || (DAY_BY_ISO[todayIso] ? todayIso : iso(START));
   useEffect(() => {
-    loadState().then(setState);
+    loadState().then(s => {
+      const c = pruneState(s);
+      setState(c.state);
+      if (c.changed) persist(c.state);
+    });
   }, []);
   const persist = useCallback(next => {
     setState(next);
@@ -3269,6 +3322,27 @@ function App() {
       }
     }, 700);
   }, []);
+  /* Cleaned so that clearing a reading actually removes it from storage rather
+     than leaving a hollow "" behind, and a day emptied of everything drops out
+     of logs entirely instead of lingering as a dead shell. */
+  const cleanMorning = m => {
+    const o = {};
+    Object.keys(m || {}).forEach(k => {
+      const v = m[k];
+      if (v === "" || v == null) return;
+      if (k === "mountain" && !v) return;
+      o[k] = v;
+    });
+    return o;
+  };
+  const dayIsEmpty = d => {
+    const hasMorning = Object.keys(cleanMorning(d.morning)).length > 0;
+    const hasSessions = (d.sessions || []).length > 0;
+    const f = d.food;
+    const hasFood = !!f && (num(f.total) > 0 || (f.items || []).length > 0);
+    const hasNotes = !!(d.notes && String(d.notes).trim());
+    return !hasMorning && !hasSessions && !hasFood && !hasNotes;
+  };
   const patchDay = (dIso, patch) => {
     const cur = state.logs[dIso] || {
       morning: {},
@@ -3279,12 +3353,14 @@ function App() {
       ...cur,
       ...patch
     };
+    next.morning = cleanMorning(next.morning);
+    const logs = {
+      ...state.logs
+    };
+    if (dayIsEmpty(next)) delete logs[dIso];else logs[dIso] = next;
     persist({
       ...state,
-      logs: {
-        ...state.logs,
-        [dIso]: next
-      }
+      logs
     });
   };
   const setMorning = (dIso, patch) => {
@@ -5846,7 +5922,7 @@ function MealRatioTrend({
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
     width: "100%",
     height: "100%"
-  }, /*#__PURE__*/React.createElement(AreaChart, {
+  }, /*#__PURE__*/React.createElement(BarChart, {
     data: rows
   }, /*#__PURE__*/React.createElement(CartesianGrid, {
     stroke: "#EDEFE9"
@@ -5872,49 +5948,34 @@ function MealRatioTrend({
     wrapperStyle: {
       fontSize: 11
     }
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: "breakfast",
     stackId: "meal",
-    stroke: "#E0A458",
     fill: "#E0A458",
-    fillOpacity: 0.8,
     name: "breakfast"
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: "lunch",
     stackId: "meal",
-    stroke: "#6E8B3D",
     fill: "#6E8B3D",
-    fillOpacity: 0.8,
     name: "lunch"
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: "dinner",
     stackId: "meal",
-    stroke: "#3B5670",
     fill: "#3B5670",
-    fillOpacity: 0.8,
     name: "dinner"
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: "snack",
     stackId: "meal",
-    stroke: "#A6759B",
     fill: "#A6759B",
-    fillOpacity: 0.8,
     name: "snack"
-  }), hasUntagged ? /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), hasUntagged ? /*#__PURE__*/React.createElement(Bar, {
     dataKey: "untagged",
     stackId: "meal",
-    stroke: "#C4CBC6",
     fill: "#C4CBC6",
-    fillOpacity: 0.8,
     name: "untagged"
   }) : null))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Each band is that meal's share of the day's calories. A dinner band that swells over time, for instance, means your intake is drifting later in the day.")) : /*#__PURE__*/React.createElement(Empty, {
+  }, "Each bar's segments show that meal's share of the day's calories. A dinner segment that swells over time, for instance, means your intake is drifting later in the day.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log food with meal tags and the composition trend appears here."
   }));
 }
@@ -6065,10 +6126,10 @@ function MacroSummary({
   }))), /*#__PURE__*/React.createElement("div", {
     className: "h-64 mt-4"
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
-    key: gran + "_" + metric,
     width: "100%",
     height: "100%"
-  }, /*#__PURE__*/React.createElement(AreaChart, {
+  }, /*#__PURE__*/React.createElement(BarChart, {
+    key: gran + "_" + metric,
     data: data
   }, /*#__PURE__*/React.createElement(CartesianGrid, {
     stroke: "#EDEFE9"
@@ -6094,42 +6155,24 @@ function MacroSummary({
     wrapperStyle: {
       fontSize: 11
     }
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: isG ? "carbsG" : "carbs",
     stackId: "macro",
-    stroke: "#3B7E9E",
     fill: "#3B7E9E",
-    fillOpacity: 0.8,
-    dot: showDots ? {
-      r: 2
-    } : false,
     name: "carbs"
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: isG ? "proteinG" : "protein",
     stackId: "macro",
-    stroke: "#B3524A",
     fill: "#B3524A",
-    fillOpacity: 0.8,
-    dot: showDots ? {
-      r: 2
-    } : false,
     name: "protein"
-  }), /*#__PURE__*/React.createElement(Area, {
-    type: "monotone",
+  }), /*#__PURE__*/React.createElement(Bar, {
     dataKey: isG ? "fatG" : "fat",
     stackId: "macro",
-    stroke: "#D8A461",
     fill: "#D8A461",
-    fillOpacity: 0.8,
-    dot: showDots ? {
-      r: 2
-    } : false,
     name: "fat"
   })))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each band is that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
+  }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each bar's segments show that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "No macro data yet. Re-parse a day's food on the Food tab (with an API key set) and its carbs/protein/fat will appear here."
   }));
 }
@@ -6362,7 +6405,8 @@ function TuningView({
       if (window.confirm("Delete ALL logged data? This cannot be undone.")) persist({
         logs: {},
         races: [],
-        manual: 0
+        manual: 0,
+        profile: state.profile
       });
     },
     className: "mt-3 text-xs px-3 py-1.5 rounded border text-red-700 hover:bg-red-50",
