@@ -5922,7 +5922,7 @@ function MealRatioTrend({
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
     width: "100%",
     height: "100%"
-  }, /*#__PURE__*/React.createElement(BarChart, {
+  }, /*#__PURE__*/React.createElement(AreaChart, {
     data: rows
   }, /*#__PURE__*/React.createElement(CartesianGrid, {
     stroke: "#EDEFE9"
@@ -5948,34 +5948,54 @@ function MealRatioTrend({
     wrapperStyle: {
       fontSize: 11
     }
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: "breakfast",
     stackId: "meal",
+    stroke: "#E0A458",
     fill: "#E0A458",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "breakfast"
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: "lunch",
     stackId: "meal",
+    stroke: "#6E8B3D",
     fill: "#6E8B3D",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "lunch"
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: "dinner",
     stackId: "meal",
+    stroke: "#3B5670",
     fill: "#3B5670",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "dinner"
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: "snack",
     stackId: "meal",
+    stroke: "#A6759B",
     fill: "#A6759B",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "snack"
-  }), hasUntagged ? /*#__PURE__*/React.createElement(Bar, {
+  }), hasUntagged ? /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: "untagged",
     stackId: "meal",
+    stroke: "#C4CBC6",
     fill: "#C4CBC6",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "untagged"
   }) : null))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, "Each bar's segments show that meal's share of the day's calories. A dinner segment that swells over time, for instance, means your intake is drifting later in the day.")) : /*#__PURE__*/React.createElement(Empty, {
+  }, "Each band is that meal's share of the day's calories. A dinner band that swells over time, for instance, means your intake is drifting later in the day.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log food with meal tags and the composition trend appears here."
   }));
 }
@@ -6128,7 +6148,7 @@ function MacroSummary({
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
     width: "100%",
     height: "100%"
-  }, /*#__PURE__*/React.createElement(BarChart, {
+  }, /*#__PURE__*/React.createElement(AreaChart, {
     key: gran + "_" + metric,
     data: data
   }, /*#__PURE__*/React.createElement(CartesianGrid, {
@@ -6155,24 +6175,36 @@ function MacroSummary({
     wrapperStyle: {
       fontSize: 11
     }
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: isG ? "carbsG" : "carbs",
     stackId: "macro",
+    stroke: "#3B7E9E",
     fill: "#3B7E9E",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "carbs"
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: isG ? "proteinG" : "protein",
     stackId: "macro",
+    stroke: "#B3524A",
     fill: "#B3524A",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "protein"
-  }), /*#__PURE__*/React.createElement(Bar, {
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
     dataKey: isG ? "fatG" : "fat",
     stackId: "macro",
+    stroke: "#D8A461",
     fill: "#D8A461",
+    fillOpacity: 0.85,
+    isAnimationActive: false,
     name: "fat"
   })))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-1"
-  }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each bar's segments show that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
+  }, isG ? "Grams stacked per " + (gran === "week" ? "week (daily average)" : "day") + " \u2014 total height tracks how much you ate." : "Each band is that macro's share of calories" + (gran === "week" ? ", averaged over the week." : " that day.") + " A common endurance-in-a-deficit aim is enough protein to protect muscle, carbs concentrated around hard sessions.")) : /*#__PURE__*/React.createElement(Empty, {
     msg: "No macro data yet. Re-parse a day's food on the Food tab (with an API key set) and its carbs/protein/fat will appear here."
   }));
 }
