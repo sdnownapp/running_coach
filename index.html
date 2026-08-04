@@ -2720,6 +2720,12 @@ const ACTIVITIES = {
     defaultRPE: 5,
     wantsDist: true
   },
+  tapis_roulant: {
+    label: "Tapis roulant",
+    treadmill: true,
+    wantsDist: false,
+    defaultRPE: 4
+  },
   tennis_hi: {
     label: "Tennis (hard)",
     hi: true,
@@ -2808,6 +2814,7 @@ const ACTIVITIES = {
 const ACT_KEYS = Object.keys(ACTIVITIES);
 const ACT_COLOR = {
   run: "#1C2321",
+  tapis_roulant: "#B5476B",
   tennis_hi: "#B35F1E",
   tennis_lo: "#D8A461",
   bike_sport: "#3E5C8A",
@@ -2822,6 +2829,18 @@ const ACT_COLOR = {
   other: "#B7BCC7"
 };
 
+/* Treadmill (tapis roulant) MET from speed + incline, via the ACSM metabolic
+   equations. Below 7 km/h uses the walking equation, at/above uses the running
+   equation (the walk->run gait change costs more energy at the same speed).
+   VO2 in ml/kg/min; MET = VO2 / 3.5. */
+function TREADMILL_MET(speedKmh, slopePct) {
+  const v = Math.max(0, num(speedKmh)) * 1000 / 60; // m/min
+  const g = Math.max(0, num(slopePct)) / 100; // grade fraction
+  const vo2 = num(speedKmh) < 7 ? 3.5 + 0.1 * v + 1.8 * v * g // walking
+  : 3.5 + 0.2 * v + 0.9 * v * g; // running
+  return Math.max(1, vo2 / 3.5);
+}
+
 /* score one session -> {kcal, effort, met, hi} */
 function scoreSession(sess, weightKg) {
   const spec = ACTIVITIES[sess.type] || ACTIVITIES.other;
@@ -2830,15 +2849,21 @@ function scoreSession(sess, weightKg) {
   const rpe = num(sess.rpe) || spec.defaultRPE;
   const wt = weightKg || 100;
   let met = spec.met || 6;
-  if (sess.type === "run") {
+  let effRpe = rpe;
+  if (sess.type === "tapis_roulant") {
+    met = TREADMILL_MET(sess.speed, sess.slope);
+    // No RPE input for the treadmill: derive perceived effort from the computed
+    // MET so effort and the HIGH/LOW flag scale with speed+incline dynamically.
+    effRpe = Math.max(1, Math.min(10, Math.round(met * 0.7)));
+  } else if (sess.type === "run") {
     if (dur > 0 && dist > 0) met = RUN_MET_FROM_PACE(dur * 60 / dist);else if (spec.metByRPE) met = spec.metByRPE[Math.max(0, Math.min(9, Math.round(rpe) - 1))];
   } else if (spec.metByRPE) {
     met = spec.metByRPE[Math.max(0, Math.min(9, Math.round(rpe) - 1))];
   }
   const hours = dur / 60;
   const kcal = met * wt * hours;
-  const effort = met * hours * rpe;
-  const hi = spec.hi || rpe >= 7;
+  const effort = met * hours * effRpe;
+  const hi = spec.hi || effRpe >= 7;
   return {
     kcal: Math.round(kcal),
     effort: Math.round(effort),
@@ -4029,7 +4054,8 @@ function SessionRow({
   onDelete
 }) {
   const spec = ACTIVITIES[sess.type];
-  const showDist = spec.wantsDist;
+  const isTread = sess.type === "tapis_roulant";
+  const showDist = spec.wantsDist && !isTread;
   return /*#__PURE__*/React.createElement("div", {
     className: "rounded border p-3",
     style: {
@@ -4073,7 +4099,23 @@ function SessionRow({
     }),
     w: "w-24",
     ph: "8"
-  }), /*#__PURE__*/React.createElement(Field, {
+  }), isTread && /*#__PURE__*/React.createElement(Field, {
+    label: "Speed km/h",
+    value: sess.speed,
+    onChange: v => onUpdate({
+      speed: v
+    }),
+    w: "w-24",
+    ph: "8"
+  }), isTread && /*#__PURE__*/React.createElement(Field, {
+    label: "Slope %",
+    value: sess.slope,
+    onChange: v => onUpdate({
+      slope: v
+    }),
+    w: "w-20",
+    ph: "2"
+  }), !isTread && /*#__PURE__*/React.createElement(Field, {
     label: "RPE 1-10",
     value: sess.rpe,
     onChange: v => onUpdate({
