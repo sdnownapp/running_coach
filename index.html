@@ -3051,6 +3051,92 @@ Food: ${text}`;
   };
 }
 
+/* Parse a free-form strength/gym log into structured exercises via the same
+   API + key the food parser uses. Format-agnostic: handles "3x8 60kg",
+   "5×5 @100", "bench 60 8,8,6", any language. */
+async function analyseStrengthText(text) {
+  const __key = (() => {
+    try {
+      return localStorage.getItem("anthropic_api_key") || "";
+    } catch (e) {
+      return "";
+    }
+  })().trim();
+  const __model = (() => {
+    try {
+      return localStorage.getItem("anthropic_model") || "";
+    } catch (e) {
+      return "";
+    }
+  })().trim() || "claude-haiku-4-5-20251001";
+  if (!__key) {
+    const e = new Error("Add an Anthropic API key in AI settings first.");
+    e.code = "NOKEY";
+    throw e;
+  }
+  const prompt = `You are a strength-training log parser. The user describes a gym/strength workout in natural language or shorthand (any language; notations like "3x8", "5×5 @100kg", "bench 60 8,8,6", "squat 4 sets of 5 at 80"). Return ONLY a JSON object, no markdown fences, no explanation, matching this exact shape:
+
+{"exercises":[{"name":"exercise name","sets":integer,"reps":integer,"weight":number,"unit":"kg|lb|bw","detail":"raw per-set breakdown if sets vary, else empty"}],"note":"one short caveat or empty string"}
+
+Rules:
+- "A x B" or "A×B" means A working sets of B reps. "@ W", "Wkg", or a trailing number is the load.
+- reps = the typical reps per set; weight = the typical load. If reps or weight differ across sets, put the representative value in reps/weight and the raw sequence in 'detail' (e.g. "8,6,4 @ 60,70,80").
+- unit is "kg", "lb", or "bw" for bodyweight/assisted moves (push-ups, pull-ups, plank, dips) — for those set weight to any ADDED load in kg, else 0.
+- Ignore pure warm-up sets unless the user counts them.
+- Use concise standard English names (e.g. "Bench press", "Back squat", "Deadlift", "Lat pulldown", "Overhead press"), even if the input is another language.
+- 'note' under 15 words; mention the biggest assumption or leave empty.
+
+Workout: ${text}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": __key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: __model,
+      max_tokens: 1200,
+      messages: [{
+        role: "user",
+        content: prompt
+      }]
+    })
+  });
+  if (!res.ok) {
+    let __m = "API " + res.status;
+    try {
+      const j = await res.json();
+      if (j && j.error && j.error.message) __m = j.error.message;
+    } catch (e) {}
+    throw new Error(__m);
+  }
+  const data = await res.json();
+  const raw = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+  const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
+  const parsed = JSON.parse(clean);
+  const exercises = (parsed.exercises || []).map(e => ({
+    name: String(e.name || ""),
+    sets: Math.max(0, Math.round(num(e.sets))),
+    reps: Math.max(0, Math.round(num(e.reps))),
+    weight: Math.max(0, num(e.weight)),
+    unit: e.unit === "lb" ? "lb" : e.unit === "bw" ? "bw" : "kg",
+    detail: String(e.detail || "")
+  }));
+  return {
+    exercises,
+    note: String(parsed.note || "")
+  };
+}
+
+/* Total training volume (load moved) for a strength session: sum of
+   sets x reps x weight over exercises. Bodyweight-only moves add 0. */
+function strengthVolume(strength) {
+  if (!strength || !strength.exercises) return 0;
+  return Math.round(strength.exercises.reduce((a, e) => a + num(e.sets) * num(e.reps) * num(e.weight), 0));
+}
+
 /* ================= MEAL TYPES ================= */
 const MEALS = [{
   id: "breakfast",
@@ -4055,7 +4141,44 @@ function SessionRow({
 }) {
   const spec = ACTIVITIES[sess.type];
   const isTread = sess.type === "tapis_roulant";
+  const isStrength = sess.type === "strength";
   const showDist = spec.wantsDist && !isTread;
+  const [sText, setSText] = useState(sess.strength && sess.strength.text || "");
+  const [sBusy, setSBusy] = useState(false);
+  const [sErr, setSErr] = useState("");
+  useEffect(() => {
+    setSText(sess.strength && sess.strength.text || "");
+  }, [sess.id]);
+  const runStrengthParse = async () => {
+    if (!sText.trim()) return;
+    setSBusy(true);
+    setSErr("");
+    try {
+      const parsed = await analyseStrengthText(sText.trim());
+      onUpdate({
+        strength: {
+          text: sText.trim(),
+          exercises: parsed.exercises,
+          note: parsed.note,
+          parsedAt: new Date().toISOString()
+        }
+      });
+    } catch (e) {
+      setSErr(e && e.message || "Parse failed.");
+    } finally {
+      setSBusy(false);
+    }
+  };
+  const saveStrengthText = () => {
+    const t = sText.trim();
+    if (t === (sess.strength && sess.strength.text || "")) return;
+    onUpdate({
+      strength: {
+        ...(sess.strength || {}),
+        text: t
+      }
+    });
+  };
   return /*#__PURE__*/React.createElement("div", {
     className: "rounded border p-3",
     style: {
@@ -4156,7 +4279,62 @@ function SessionRow({
         background: calc.hi ? "#B3272D" : "#5F7A5F"
       }
     }, calc.hi ? "HIGH" : "LOW", " INTENSITY"));
-  })());
+  })(), isStrength && /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 pt-3 border-t",
+    style: {
+      borderColor: "#EDEFE9"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs uppercase tracking-widest text-gray-500 mb-1",
+    style: mono
+  }, "Strength log"), /*#__PURE__*/React.createElement("textarea", {
+    value: sText,
+    onChange: e => setSText(e.target.value),
+    onBlur: saveStrengthText,
+    placeholder: "e.g. Bench 3x8 60kg, Squat 5x5 @100, Pull-ups 3x10, Plank 3x60s",
+    rows: 2,
+    className: "w-full rounded border p-2",
+    style: {
+      borderColor: "#D6DAD2",
+      ...mono,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3 mt-2 flex-wrap"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: runStrengthParse,
+    disabled: sBusy || !sText.trim(),
+    className: "px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-50",
+    style: {
+      background: "#1C2321",
+      ...mono
+    }
+  }, sBusy ? "Parsing\u2026" : "Parse workout"), sErr && /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-red-600"
+  }, sErr)), sess.strength && sess.strength.exercises && sess.strength.exercises.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mt-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1"
+  }, sess.strength.exercises.map((e, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: "flex justify-between text-sm gap-3",
+    style: mono
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-700"
+  }, e.name), /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-500 text-right"
+  }, `${e.sets}\u00d7${e.reps}` + (e.unit === "bw" ? e.weight > 0 ? ` +${e.weight}kg` : " bw" : ` @ ${e.weight}${e.unit}`) + (e.detail ? ` (${e.detail})` : ""))))), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between text-sm pt-1.5 mt-1.5 border-t font-semibold",
+    style: {
+      ...mono,
+      borderColor: "#EDEFE9"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-500"
+  }, "Total volume"), /*#__PURE__*/React.createElement("span", null, strengthVolume(sess.strength).toLocaleString(), " kg")), sess.strength.note && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-gray-400 mt-1",
+    style: mono
+  }, sess.strength.note))));
 }
 
 /* ================= FOOD CARD ================= */
