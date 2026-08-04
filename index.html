@@ -3079,11 +3079,14 @@ async function analyseStrengthText(text) {
 {"exercises":[{"name":"exercise name","sets":integer,"reps":integer,"weight":number,"unit":"kg|lb|bw","detail":"raw per-set breakdown if sets vary, else empty"}],"note":"one short caveat or empty string"}
 
 Rules:
-- "A x B" or "A×B" means A working sets of B reps. "@ W", "Wkg", or a trailing number is the load.
-- reps = the typical reps per set; weight = the typical load. If reps or weight differ across sets, put the representative value in reps/weight and the raw sequence in 'detail' (e.g. "8,6,4 @ 60,70,80").
-- unit is "kg", "lb", or "bw" for bodyweight/assisted moves (push-ups, pull-ups, plank, dips) — for those set weight to any ADDED load in kg, else 0.
-- Ignore pure warm-up sets unless the user counts them.
-- Use concise standard English names (e.g. "Bench press", "Back squat", "Deadlift", "Lat pulldown", "Overhead press"), even if the input is another language.
+- "A x B" (or "A×B") is sets and reps, but the ORIENTATION varies by person, so infer it: the SMALLER number is the number of sets (people rarely do more than ~8 working sets), the larger is reps. Examples: "3x8" = 3 sets of 8 reps; "20x2" = 2 sets of 20 reps; "5x5" = 5 sets of 5. When equal, treat as sets×reps.
+- A bare number before a move (e.g. "20 legs up") = 1 set of that many reps.
+- "@ W", "Wkg", or a trailing number is the load. If no load is given and it's a bodyweight move, unit "bw", weight 0.
+- Timed / isometric holds (plank, wall sit, dead hang, "1'30\"", "45s"): there are no reps — set reps to 0, sets to the count (default 1), unit "bw", and put the hold duration in 'detail' (e.g. "1'30\" hold").
+- If a line names an exercise with NO numbers at all (e.g. "weights for shoulders"), still include it: sets 0, reps 0, weight 0, unit "kg", and put "unspecified" in 'detail'.
+- unit is "kg", "lb", or "bw" for bodyweight/assisted moves — for those, weight = any ADDED load in kg, else 0.
+- If reps or weight vary across sets, put the representative value in reps/weight and the raw sequence in 'detail'.
+- Use concise standard English names (e.g. "Push-ups", "Bodyweight squat", "Calf raises", "Plank", "Crunches", "Leg raises", "Shoulder press"), even if the input is another language or has typos.
 - 'note' under 15 words; mention the biggest assumption or leave empty.
 
 Workout: ${text}`;
@@ -3135,6 +3138,20 @@ Workout: ${text}`;
 function strengthVolume(strength) {
   if (!strength || !strength.exercises) return 0;
   return Math.round(strength.exercises.reduce((a, e) => a + num(e.sets) * num(e.reps) * num(e.weight), 0));
+}
+/* Total reps (sets x reps) — the meaningful summary for bodyweight work where
+   load-volume is zero. Timed holds (reps 0) contribute nothing here. */
+function strengthReps(strength) {
+  if (!strength || !strength.exercises) return 0;
+  return Math.round(strength.exercises.reduce((a, e) => a + num(e.sets) * num(e.reps), 0));
+}
+/* Human-readable per-exercise line, handling rep-based, timed (reps 0 -> show
+   the hold in detail) and unspecified entries. */
+function strengthLine(e) {
+  const load = e.unit === "bw" ? num(e.weight) > 0 ? ` +${e.weight}kg` : " bw" : num(e.weight) > 0 ? ` @ ${e.weight}${e.unit}` : "";
+  if (num(e.reps) > 0) return `${e.sets}\u00d7${e.reps}${load}` + (e.detail ? ` (${e.detail})` : "");
+  if (e.detail) return (num(e.sets) > 0 ? `${e.sets}\u00d7 ` : "") + e.detail;
+  return num(e.sets) > 0 ? `${e.sets} set` : "\u2014";
 }
 
 /* ================= MEAL TYPES ================= */
@@ -4323,15 +4340,22 @@ function SessionRow({
     className: "text-gray-700"
   }, e.name), /*#__PURE__*/React.createElement("span", {
     className: "text-gray-500 text-right"
-  }, `${e.sets}\u00d7${e.reps}` + (e.unit === "bw" ? e.weight > 0 ? ` +${e.weight}kg` : " bw" : ` @ ${e.weight}${e.unit}`) + (e.detail ? ` (${e.detail})` : ""))))), /*#__PURE__*/React.createElement("div", {
-    className: "flex justify-between text-sm pt-1.5 mt-1.5 border-t font-semibold",
+  }, strengthLine(e))))), /*#__PURE__*/React.createElement("div", {
+    className: "pt-1.5 mt-1.5 border-t",
     style: {
-      ...mono,
       borderColor: "#EDEFE9"
     }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between text-sm font-semibold",
+    style: mono
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-gray-500"
-  }, "Total volume"), /*#__PURE__*/React.createElement("span", null, strengthVolume(sess.strength).toLocaleString(), " kg")), sess.strength.note && /*#__PURE__*/React.createElement("div", {
+  }, "Total reps"), /*#__PURE__*/React.createElement("span", null, strengthReps(sess.strength).toLocaleString())), strengthVolume(sess.strength) > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between text-sm font-semibold mt-0.5",
+    style: mono
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-500"
+  }, "Total volume"), /*#__PURE__*/React.createElement("span", null, strengthVolume(sess.strength).toLocaleString(), " kg"))), sess.strength.note && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-400 mt-1",
     style: mono
   }, sess.strength.note))));
