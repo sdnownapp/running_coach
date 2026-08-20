@@ -188,6 +188,44 @@ window.addEventListener("error", function (ev) {
     pushTimer = setTimeout(function () { syncNow(false); }, 2500);
   }
 
+  /* ---- Auditable Google Sheet (coach-data-audit) ----
+     Uploaded as CSV with the Google Sheets mime type so Drive converts it into a
+     real, human-readable spreadsheet. Uses the same drive.file scope/token as the
+     JSON sync above; the app only ever sees files it created. */
+  var AUDIT = "coach-data-audit";
+  function multipartSheet(id, csv) {
+    var b = "au" + Date.now();
+    var meta = id ? { mimeType: "application/vnd.google-apps.spreadsheet" }
+                  : { name: AUDIT, mimeType: "application/vnd.google-apps.spreadsheet" };
+    var body = "--" + b + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
+      JSON.stringify(meta) + "\r\n--" + b +
+      "\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n" + csv + "\r\n--" + b + "--";
+    var url = "https://www.googleapis.com/upload/drive/v3/files" + (id ? "/" + id : "") +
+      "?uploadType=multipart&fields=id,webViewLink";
+    return api(url, { method: id ? "PATCH" : "POST", headers: { "Content-Type": "multipart/related; boundary=" + b }, body: body })
+      .then(function (r) { return r.json(); });
+  }
+  function findAudit() {
+    var q = encodeURIComponent("name='" + AUDIT + "' and trashed=false");
+    return api("https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,webViewLink,modifiedTime)&q=" + q)
+      .then(function (r) { return r.json(); })
+      .then(function (j) { return (j.files && j.files[0]) || null; });
+  }
+  function exportAudit(csv) {
+    return ensureToken(true).then(function () {
+      return findAudit().then(function (f) {
+        return multipartSheet(f && f.id, csv).then(function (j) {
+          var id = (j && j.id) || (f && f.id);
+          return {
+            id: id,
+            created: !f,
+            link: (j && j.webViewLink) || (f && f.webViewLink) || (id ? "https://docs.google.com/spreadsheets/d/" + id : "https://drive.google.com/")
+          };
+        });
+      });
+    });
+  }
+
   window.CoachSync = {
     get: function () { return { status: S.status, lastSynced: S.lastSynced, error: S.error }; },
     subscribe: function (cb) { listeners.push(cb); cb(this.get()); return function () { listeners = listeners.filter(function (f) { return f !== cb; }); }; },
@@ -202,7 +240,9 @@ window.addEventListener("error", function (ev) {
     },
     syncNow: function () { return syncNow(false); },
     disconnect: function () { token = null; try { localStorage.removeItem(FLAGK); } catch (e) {} set({ status: "disconnected", lastSynced: null, error: null }); },
-    touch: function () { setMeta({ updatedAt: Date.now(), fileId: meta().fileId }); schedulePush(); }
+    touch: function () { setMeta({ updatedAt: Date.now(), fileId: meta().fileId }); schedulePush(); },
+    isConnected: function () { try { return localStorage.getItem(FLAGK) === "1" && !!clientId(); } catch (e) { return false; } },
+    exportAudit: function (csv) { return exportAudit(csv); }
   };
 
   /* On load: if the user previously connected, try a silent token + sync. */
@@ -3133,6 +3173,277 @@ Workout: ${text}`;
   };
 }
 
+/* ================= COACH ANALYSIS =================
+   Resolve which model writes the coaching commentary. A dedicated, optional
+   "coach model" lets the user point the analysis at a stronger model than the
+   cheap one used for parsing food; if unset we fall back to the app-wide model,
+   then to the inexpensive default so it always works out of the box. */
+function coachModel() {
+  const pick = k => {
+    try { return (localStorage.getItem(k) || "").trim(); } catch (e) { return ""; }
+  };
+  return pick("anthropic_coach_model") || pick("anthropic_model") || "claude-haiku-4-5-20251001";
+}
+
+/* Small numeric helpers kept local so the summary builder stays self-contained. */
+const _avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+const _round = (v, p = 0) => v == null ? null : Math.round(v * Math.pow(10, p)) / Math.pow(10, p);
+
+/* Distil the whole logged period into a compact, model-friendly metrics object.
+   This is the single source of truth handed both to the coach (for narrative)
+   and, in lightly reshaped form, to the audit sheet. Everything is bounded by
+   `cutoff` so "progress to date" means exactly that. */
+function buildProgressSummary(rollups, state, cutoff) {
+  const days = ALL_DAYS.filter(d => d.d <= cutoff);
+  const R = d => rollups[d.d] || {};
+  const has = r => (r.sessions && r.sessions.length > 0) || num(r.intake) > 0 || num(r.morning && r.morning.weight) > 40 || (r.morning && (r.morning.rhr || r.morning.sleep || r.morning.energy));
+  const logged = days.filter(d => has(R(d)));
+  const firstLogged = logged.length ? logged[0].d : null;
+  const lastLogged = logged.length ? logged[logged.length - 1].d : null;
+  const spanDays = firstLogged ? Math.max(1, Math.round((fromIso(lastLogged) - fromIso(firstLogged)) / DAY) + 1) : 0;
+  const weeksCovered = new Set(logged.map(d => d.week)).size;
+
+  /* --- weight --- */
+  const wPts = [];
+  days.forEach(d => { const w = num(R(d).morning && R(d).morning.weight); if (w > 40) wPts.push({ d: d.d, w }); });
+  let weight = null;
+  if (wPts.length) {
+    const first = wPts[0], last = wPts[wPts.length - 1];
+    const lo = wPts.reduce((m, p) => p.w < m.w ? p : m, wPts[0]);
+    const wkSpan = Math.max(1 / 7, (fromIso(last.d) - fromIso(first.d)) / (7 * DAY));
+    weight = {
+      readings: wPts.length,
+      startKg: _round(first.w, 1), startDate: first.d,
+      latestKg: _round(last.w, 1), latestDate: last.d,
+      lowestKg: _round(lo.w, 1),
+      changeKg: _round(last.w - first.w, 1),
+      ratePerWeekKg: _round((last.w - first.w) / wkSpan, 2)
+    };
+  }
+
+  /* --- training load --- */
+  let planEff = 0, actEff = 0, hi = 0, lo = 0, actKcal = 0, mins = 0, trained = 0, planDays = 0;
+  const byAct = {};
+  days.forEach(d => {
+    const r = R(d);
+    planEff += num(r.planEffort); actEff += num(r.actEffort);
+    hi += num(r.actHi); lo += num(r.actLo); actKcal += num(r.actKcal); mins += num(r.actMin);
+    if (num(r.planEffort) > 20) planDays++;
+    if (r.sessions && r.sessions.length) {
+      trained++;
+      r.sessions.forEach(s => {
+        const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
+        const key = spec.label || s.type;
+        const b = byAct[key] || (byAct[key] = { sessions: 0, minutes: 0, kcal: 0, km: 0 });
+        b.sessions++; b.minutes += num(s.dur); b.km += num(s.dist);
+        b.kcal += num(s.calc && s.calc.kcal);
+      });
+    }
+  });
+  Object.keys(byAct).forEach(k => {
+    byAct[k].minutes = Math.round(byAct[k].minutes);
+    byAct[k].kcal = Math.round(byAct[k].kcal);
+    byAct[k].km = _round(byAct[k].km, 1);
+  });
+  const training = {
+    daysTrained: trained,
+    daysWithPlannedWork: planDays,
+    compliancePct: planDays ? Math.round(100 * trained / planDays) : null,
+    totalMinutes: Math.round(mins),
+    actualEffort: Math.round(actEff),
+    plannedEffortToDate: Math.round(planEff),
+    effortVsPlanPct: planEff > 0 ? Math.round(100 * actEff / planEff) : null,
+    hiEffort: Math.round(hi), loEffort: Math.round(lo),
+    hiToLoRatio: lo > 0 ? _round(hi / lo, 2) : null,
+    sessionKcal: Math.round(actKcal),
+    byActivity: byAct
+  };
+
+  /* --- energy balance & macros, restricted to food-logged days --- */
+  let fIntake = 0, fBurn = 0, fDays = 0, sumBal = 0, c = 0, p = 0, f = 0;
+  days.forEach(d => {
+    const r = R(d);
+    if (num(r.intake) > 0) {
+      fDays++; fIntake += num(r.intake); fBurn += num(r.totalBurn);
+      sumBal += num(r.balance);
+      (r.food && r.food.items || []).forEach(it => {
+        c += Math.max(0, num(it.carbs)); p += Math.max(0, num(it.protein)); f += Math.max(0, num(it.fat));
+      });
+    }
+  });
+  const macroKcal = c * 4 + p * 4 + f * 9;
+  const energy = fDays ? {
+    foodLoggedDays: fDays,
+    avgIntakeKcal: Math.round(fIntake / fDays),
+    avgBurnKcal: Math.round(fBurn / fDays),
+    avgDailyBalanceKcal: Math.round(sumBal / fDays),
+    cumulativeIntakeKcal: Math.round(fIntake),
+    cumulativeBurnKcal: Math.round(fBurn),
+    netKcal: Math.round(fIntake - fBurn),
+    avgMacrosPerDay_g: { carbs: _round(c / fDays, 0), protein: _round(p / fDays, 0), fat: _round(f / fDays, 0) },
+    macroSplitPct: macroKcal > 0 ? { carbs: Math.round(100 * c * 4 / macroKcal), protein: Math.round(100 * p * 4 / macroKcal), fat: Math.round(100 * f * 9 / macroKcal) } : null
+  } : null;
+
+  /* --- recovery: RHR / sleep / energy, first vs last 14 logged --- */
+  const rhr = [], sleep = [], en = [];
+  days.forEach(d => {
+    const m = R(d).morning || {};
+    if (num(m.rhr) > 25 && num(m.rhr) < 120) rhr.push({ d: d.d, v: num(m.rhr) });
+    if (num(m.sleep) > 0) sleep.push(num(m.sleep));
+    if (num(m.energy) > 0) en.push(num(m.energy));
+  });
+  const firstLast = (arr, n) => ({ early: _avg(arr.slice(0, n).map(x => x.v != null ? x.v : x)), recent: _avg(arr.slice(-n).map(x => x.v != null ? x.v : x)) });
+  const recovery = {
+    rhr: rhr.length ? { readings: rhr.length, avg: _round(_avg(rhr.map(x => x.v)), 1), earlyAvg: _round(firstLast(rhr, 14).early, 1), recentAvg: _round(firstLast(rhr, 14).recent, 1) } : null,
+    avgSleepH: sleep.length ? _round(_avg(sleep), 1) : null,
+    avgEnergy1to5: en.length ? _round(_avg(en), 1) : null
+  };
+
+  /* --- races within range --- */
+  const races = (state.races || []).filter(r => r.date <= cutoff && num(r.km) > 0 && num(r.sec) > 0)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(r => ({ date: r.date, km: num(r.km), timeSec: num(r.sec), paceSecPerKm: Math.round(num(r.sec) / num(r.km)) }));
+
+  /* --- momentum: last 7 elapsed days vs the 7 before --- */
+  const window = (endIso, back) => days.filter(d => {
+    const gap = Math.round((fromIso(endIso) - fromIso(d.d)) / DAY);
+    return gap >= 0 && gap < back;
+  });
+  const bucket = arr => {
+    let t = 0, e = 0, bal = 0, bn = 0; const ws = [];
+    arr.forEach(d => {
+      const r = R(d);
+      if (r.sessions && r.sessions.length) t++;
+      e += num(r.actEffort);
+      if (num(r.intake) > 0) { bal += num(r.balance); bn++; }
+      const w = num(r.morning && r.morning.weight); if (w > 40) ws.push(w);
+    });
+    return { trainedDays: t, effort: Math.round(e), avgBalanceKcal: bn ? Math.round(bal / bn) : null, avgWeightKg: ws.length ? _round(_avg(ws), 1) : null };
+  };
+  const last7 = window(cutoff, 7);
+  const prev7 = days.filter(d => { const g = Math.round((fromIso(cutoff) - fromIso(d.d)) / DAY); return g >= 7 && g < 14; });
+  const momentum = { last7Days: bucket(last7), previous7Days: bucket(prev7) };
+
+  return {
+    period: { from: firstLogged, to: lastLogged, days: spanDays, weeksCovered, generatedAt: new Date().toISOString() },
+    goals: { race12k: "2027-04-04", halfMarathon: "2027-05-09" },
+    weight, training, energy, recovery, races, momentum
+  };
+}
+
+/* Call the coach. `summary` is the object from buildProgressSummary; `prevReports`
+   is the short history so the coach can reference the trajectory since last time. */
+async function analyseProgress(summary, prevReports) {
+  const __key = (() => { try { return localStorage.getItem("anthropic_api_key") || ""; } catch (e) { return ""; } })().trim();
+  if (!__key) { const e = new Error("Add an Anthropic API key in AI settings first."); e.code = "NOKEY"; throw e; }
+  const __model = coachModel();
+  const priorLine = (prevReports && prevReports.length)
+    ? "\n\nFor continuity, here are the dates and headlines of the previous reports (oldest first) so you can note what has changed since — do NOT repeat them verbatim:\n" +
+      prevReports.slice().reverse().map(r => `- ${(r.at || "").slice(0, 10)}: ${(r.headline || (r.text || "").slice(0, 90)).replace(/\s+/g, " ")}`).join("\n")
+    : "";
+  const prompt = `You are a Senior Training Coach and sports physiologist with 25 years guiding endurance athletes. You specialise in the interplay of running performance, metabolism and body composition. You are analysing one athlete preparing for a 12K (4 Apr 2027) and a half marathon (9 May 2027).
+
+Below is a JSON snapshot of everything they have logged so far — training load, energy balance, macros, weight trend, recovery markers, race results and recent momentum. Effort is a unitless internal index (MET × hours × RPE). "Balance" is intake minus total burn (BMR + sessions): negative = deficit. Calorie figures are estimates (±15%).
+
+Write the athlete a coaching report in plain, natural language — the way you would actually talk to them. Cover, weaving them together rather than as a checklist:
+1. Headline: are they progressing, holding, or slipping — and on what evidence.
+2. Body composition & metabolism: read the weight trend against the energy balance. Is the rate of loss sensible for someone still training hard, or too aggressive / too slow? Flag any deficit that threatens training quality or muscle.
+3. Training: volume, consistency/compliance, and the high-vs-low intensity mix (are they respecting easy days?).
+4. Fuelling: is intake and macro split (esp. protein and carbs) supporting the work and the race goals?
+5. Recovery: what RHR, sleep and energy trends suggest about fatigue.
+6. The two or three things that matter most for the next block, as specific, actionable coach's orders.
+
+Rules:
+- Be honest and specific; cite the athlete's own numbers. Encouraging but not a cheerleader — name problems plainly.
+- If a whole area has no data, say so briefly and tell them what to start logging. Never invent numbers.
+- 250–450 words. Use short paragraphs. You may use a few bold lead-ins, but no big headers and no markdown tables.
+- Do not give medical advice or diagnose; frame as training guidance.
+- Start the very first line with a short bracketed headline of max 8 words, e.g. "[On track, but ease the deficit]", then a blank line, then the report.
+${priorLine}
+
+DATA:
+${JSON.stringify(summary)}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": __key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({ model: __model, max_tokens: 1600, messages: [{ role: "user", content: prompt }] })
+  });
+  if (!res.ok) {
+    let __m = "API " + res.status;
+    try { const j = await res.json(); if (j && j.error && j.error.message) __m = j.error.message; } catch (e) {}
+    const e = new Error(__m); if (res.status === 404) e.hint = "Model not found — check the coach model in AI settings."; throw e;
+  }
+  const data = await res.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+  if (!text) throw new Error("Empty response from the model.");
+  const hMatch = text.match(/^\s*\[([^\]]{2,80})\]/);
+  const headline = hMatch ? hMatch[1].trim() : "";
+  return { text, headline, model: __model };
+}
+
+/* ---- CSV audit builder: one row per logged day, every stat, plus a totals row.
+   Uploaded to Drive and converted to a real Google Sheet named coach-data-audit. */
+function csvCell(v) {
+  if (v == null) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function buildAuditCsv(rollups, state, cutoff) {
+  const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
+    "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Balance kcal",
+    "Carbs g", "Protein g", "Fat g", "Act effort", "HI effort", "LO effort", "Notes"];
+  const rows = [];
+  let tKcal = 0, tBurn = 0, tIntake = 0, tEff = 0, tHi = 0, tLo = 0, tMin = 0, nTrain = 0, nFood = 0;
+  ALL_DAYS.forEach(d => {
+    if (d.d > cutoff) return;
+    const r = rollups[d.d]; if (!r) return;
+    const m = r.morning || {};
+    const sess = r.sessions || [];
+    const food = r.food || {};
+    const macro = (food.items || []).reduce((a, it) => ({ c: a.c + num(it.carbs), p: a.p + num(it.protein), f: a.f + num(it.fat) }), { c: 0, p: 0, f: 0 });
+    const notes = (state.logs[d.d] && state.logs[d.d].notes) || "";
+    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim());
+    if (!anyData) return;
+    const detail = sess.map(s => {
+      const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
+      const bits = [spec.label || s.type];
+      if (num(s.dur) > 0) bits.push(Math.round(num(s.dur)) + "min");
+      if (num(s.dist) > 0) bits.push(num(s.dist) + "km");
+      if (s.calc && s.calc.kcal) bits.push(s.calc.kcal + "kcal");
+      return bits.join(" ");
+    }).join(" | ");
+    if (sess.length) { nTrain++; tMin += num(r.actMin); }
+    if (num(r.intake) > 0) nFood++;
+    tKcal += num(r.actKcal); tBurn += num(r.totalBurn); tIntake += num(r.intake);
+    tEff += num(r.actEffort); tHi += num(r.actHi); tLo += num(r.actLo);
+    rows.push([
+      d.d, WD[fromIso(d.d).getDay()], d.week, (PLAN.phases[d.ph] && PLAN.phases[d.ph].name) || d.ph || "",
+      KIND_LABEL[d.k] || d.k || "", num(m.weight) > 40 ? _round(num(m.weight), 1) : "", m.rhr || "", m.sleep || "", m.energy || "",
+      sess.length, detail, Math.round(num(r.actKcal)), Math.round(num(r.bmr)), Math.round(num(r.totalBurn)),
+      num(r.intake) > 0 ? Math.round(num(r.intake)) : "", r.balance != null ? Math.round(num(r.balance)) : "",
+      macro.c ? _round(macro.c, 0) : "", macro.p ? _round(macro.p, 0) : "", macro.f ? _round(macro.f, 0) : "",
+      Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)), notes
+    ]);
+  });
+  const totals = ["TOTALS / AVG", "", "", "", "", "", "", "", "",
+    nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
+    nFood ? Math.round(tIntake) : "", nFood ? Math.round(tIntake - tBurn) : "",
+    "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), ""];
+  const meta = "coach-data-audit  generated " + new Date().toISOString() + "  (calorie figures are MET-based estimates, ±15%)";
+  const lines = [];
+  lines.push(csvCell(meta));
+  lines.push(cols.map(csvCell).join(","));
+  rows.forEach(r => lines.push(r.map(csvCell).join(",")));
+  lines.push(totals.map(csvCell).join(","));
+  return lines.join("\r\n");
+}
+
 /* Total training volume (load moved) for a strength session: sum of
    sets x reps x weight over exercises. Bodyweight-only moves add 0. */
 function strengthVolume(strength) {
@@ -3218,6 +3529,7 @@ const emptyState = {
   logs: {},
   races: [],
   manual: 0,
+  coachReports: [],
   profile: {
     ...DEFAULT_PROFILE
   }
@@ -3507,6 +3819,21 @@ function App() {
   const setSessions = (dIso, sessions) => patchDay(dIso, {
     sessions
   });
+  /* Coach reports are kept in state (newest first, capped) so they persist and
+     ride the same Google Drive sync as everything else. */
+  const saveCoachReport = rep => {
+    const prev = state.coachReports || [];
+    persist({
+      ...state,
+      coachReports: [rep, ...prev].slice(0, 60)
+    });
+  };
+  const deleteCoachReport = id => {
+    persist({
+      ...state,
+      coachReports: (state.coachReports || []).filter(r => r.id !== id)
+    });
+  };
 
   /* ---------- per-day rollups (planned + actual) ---------- */
   const rollups = useMemo(() => {
@@ -4074,7 +4401,9 @@ function App() {
     rollups: rollups,
     state: state,
     activeIso: activeIso,
-    todayIso: todayIso
+    todayIso: todayIso,
+    saveCoachReport: saveCoachReport,
+    deleteCoachReport: deleteCoachReport
   }), view === "tuning" && /*#__PURE__*/React.createElement(TuningView, {
     state: state,
     engine: engine,
@@ -4457,10 +4786,18 @@ function FoodCard({
       return "claude-haiku-4-5-20251001";
     }
   });
+  const [coachMdl, setCoachMdl] = useState(() => {
+    try {
+      return localStorage.getItem("anthropic_coach_model") || "";
+    } catch (e) {
+      return "";
+    }
+  });
   const saveKey = () => {
     try {
       localStorage.setItem("anthropic_api_key", apiKey.trim());
       localStorage.setItem("anthropic_model", apiModel.trim() || "claude-haiku-4-5-20251001");
+      localStorage.setItem("anthropic_coach_model", coachMdl.trim());
     } catch (e) {}
     setErr("");
     setShowKey(false);
@@ -4589,6 +4926,12 @@ function FoodCard({
     onChange: setApiModel,
     w: "w-56",
     ph: "claude-haiku-4-5-20251001"
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "Coach model (optional)",
+    value: coachMdl,
+    onChange: setCoachMdl,
+    w: "w-56",
+    ph: "stronger model for analysis"
   }), /*#__PURE__*/React.createElement("button", {
     onClick: saveKey,
     className: "px-3 py-1.5 rounded text-white text-xs font-semibold",
@@ -4596,7 +4939,9 @@ function FoodCard({
       background: "#1C2321",
       ...mono
     }
-  }, "SAVE KEY"))), /*#__PURE__*/React.createElement("div", {
+  }, "SAVE KEY")), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-gray-500 mt-2"
+  }, "Parsing food and workouts uses the cheap default model above. The coach's Progress analysis is a heavier read \u2014 leave \u201CCoach model\u201D blank to reuse that model, or set a stronger one (a Sonnet- or Opus-class model your key can access) for a sharper report.")), /*#__PURE__*/React.createElement("div", {
     className: "flex items-end gap-2 mt-3 flex-wrap"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Add item manually",
@@ -5303,12 +5648,118 @@ function SeasonView({
   }))));
 }
 
+/* ================= COACH'S ANALYSIS ================= */
+function fmtReportDate(isoStr) {
+  try {
+    return new Date(isoStr).toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return isoStr || ""; }
+}
+/* Render the coach's markdown-lite reply: paragraphs on blank lines, **bold** inline. */
+function renderCoachText(text) {
+  const h = React.createElement;
+  const body = String(text || "").replace(/^\s*\[[^\]]{2,80}\]\s*\n?/, "").trim();
+  return body.split(/\n{2,}/).map((para, i) => {
+    const parts = para.split(/\*\*(.+?)\*\*/g);
+    const nodes = parts.map((seg, j) => j % 2 === 1 ? h("b", { key: j }, seg) : seg);
+    return h("p", { key: i, className: "text-sm leading-relaxed", style: { color: "#1C2321", marginTop: i ? "0.6rem" : 0 } }, nodes);
+  });
+}
+function CoachAnalysis({ rollups, state, cutoff, saveCoachReport, deleteCoachReport }) {
+  const h = React.createElement;
+  const reports = state.coachReports || [];
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [openId, setOpenId] = useState(reports[0] ? reports[0].id : null);
+  const [audit, setAudit] = useState({ busy: false, msg: "", link: "", err: "" });
+  const summary = useMemo(() => buildProgressSummary(rollups, state, cutoff), [rollups, state, cutoff]);
+  const dataThin = !summary.period.from;
+
+  const run = async () => {
+    setBusy(true); setErr("");
+    try {
+      const out = await analyseProgress(summary, reports);
+      const rep = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        at: new Date().toISOString(),
+        from: summary.period.from, to: summary.period.to,
+        headline: out.headline, text: out.text, model: out.model,
+        metrics: summary
+      };
+      saveCoachReport(rep);
+      setOpenId(rep.id);
+    } catch (e) {
+      if (e && e.code === "NOKEY") setErr("Add your Anthropic API key first (Today \u2192 Food & Energy Balance \u2192 AI SETTINGS). The coach uses the same key.");
+      else setErr((e && e.message ? e.message : "Analysis failed") + (e && e.hint ? " \u2014 " + e.hint : ""));
+    } finally { setBusy(false); }
+  };
+
+  const doExport = async () => {
+    if (!(window.CoachSync && window.CoachSync.isConnected && window.CoachSync.isConnected())) {
+      setAudit({ busy: false, msg: "", link: "", err: "Connect Google Drive first (SEASON tab \u2192 \u201CSync across devices\u201D), then export the audit sheet." });
+      return;
+    }
+    setAudit({ busy: true, msg: "Building sheet\u2026", link: "", err: "" });
+    try {
+      const csv = buildAuditCsv(rollups, state, cutoff);
+      const res = await window.CoachSync.exportAudit(csv);
+      setAudit({ busy: false, msg: (res.created ? "Created" : "Updated") + " coach-data-audit in your Google Drive.", link: res.link, err: "" });
+    } catch (e) {
+      setAudit({ busy: false, msg: "", link: "", err: (e && e.message) ? e.message : "Export failed." });
+    }
+  };
+
+  const latest = reports[0];
+  return h(Card, { className: "p-5", style: { borderColor: "#D8D2C4", background: "#FCFBF7" } },
+    h("div", { className: "flex items-baseline justify-between flex-wrap gap-3" },
+      h(Eyebrow, { color: "#8A6D3B" }, "COACH'S ANALYSIS"),
+      h("div", { className: "flex items-center gap-2 flex-wrap" },
+        h("button", { onClick: run, disabled: busy || dataThin,
+          className: "px-4 py-1.5 rounded text-white text-sm font-semibold disabled:opacity-40",
+          style: { background: "#8A6D3B", ...mono } },
+          busy ? "ANALYSING\u2026" : reports.length ? "RE-ANALYSE" : "ANALYSE MY PROGRESS"),
+        h("button", { onClick: doExport, disabled: audit.busy || dataThin,
+          className: "px-3 py-1.5 rounded border text-xs disabled:opacity-40",
+          style: { borderColor: "#D8CDB0", color: "#6B5A38", ...mono } },
+          audit.busy ? "EXPORTING\u2026" : "EXPORT AUDIT SHEET"))),
+    h("div", { className: "text-sm text-gray-600 mt-2" },
+      "A senior coach reads everything you've logged \u2014 weight, training load, calories in and out, macros, recovery \u2014 and writes a plain-language verdict with what to do next. Each analysis is saved below, so you can track how the story changes over time."),
+    dataThin && h("div", { className: "text-xs text-gray-500 mt-2", style: mono },
+      "Log a few days (sessions, weight, or food) first \u2014 then the coach will have something to read."),
+    err && h("div", { className: "text-sm text-red-700 mt-3" }, err),
+    (audit.msg || audit.err) && h("div", { className: "text-xs mt-2", style: { color: audit.err ? "#B3272D" : "#2E7D4F" } },
+      audit.err || audit.msg,
+      audit.link && !audit.err ? h("a", { href: audit.link, target: "_blank", rel: "noreferrer", className: "underline ml-1", style: { color: "#3B5670" } }, "Open sheet \u2192") : null),
+    latest && h("div", { className: "mt-4 rounded-lg border p-4", style: { borderColor: "#E6DFCD", background: "#fff" } },
+      h("div", { className: "flex items-baseline justify-between gap-3 flex-wrap" },
+        h("div", { className: "text-base font-bold", style: { color: "#5A4A25" } }, latest.headline || "Latest report"),
+        h("span", { className: "text-xs text-gray-500", style: mono }, fmtReportDate(latest.at))),
+      h("div", { className: "mt-2" }, renderCoachText(latest.text)),
+      h("div", { className: "text-xs text-gray-400 mt-3", style: mono },
+        "covers " + (latest.from || "\u2014") + " \u2192 " + (latest.to || "\u2014") + (latest.model ? " \u00B7 " + latest.model : ""))),
+    reports.length > 1 && h("div", { className: "mt-4" },
+      h(Eyebrow, { color: "#9AA6A0" }, "REPORT HISTORY \u00B7 " + reports.length),
+      h("div", { className: "mt-2 divide-y", style: { borderColor: "#EDEFE9" } },
+        reports.map(r => h("div", { key: r.id, className: "py-2" },
+          h("div", { className: "flex items-center justify-between gap-2" },
+            h("button", { onClick: () => setOpenId(openId === r.id ? null : r.id), className: "text-left flex-1 min-w-0" },
+              h("span", { className: "text-xs text-gray-500 mr-2", style: mono }, fmtReportDate(r.at)),
+              h("span", { className: "text-sm font-medium" }, r.headline || "Report")),
+            h("button", { onClick: () => { if (deleteCoachReport) deleteCoachReport(r.id); if (openId === r.id) setOpenId(null); },
+              className: "text-xs text-gray-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50", title: "Delete report" }, "\u2715")),
+          openId === r.id && h("div", { className: "mt-2 pl-1" }, renderCoachText(r.text),
+            h("div", { className: "text-xs text-gray-400 mt-2", style: mono },
+              "covers " + (r.from || "\u2014") + " \u2192 " + (r.to || "\u2014") + (r.model ? " \u00B7 " + r.model : "")))
+        )))));
+}
+
 /* ================= PROGRESS VIEW — plan vs actual across whole period ================= */
 function ProgressView({
   rollups,
   state,
   activeIso,
-  todayIso
+  todayIso,
+  saveCoachReport,
+  deleteCoachReport
 }) {
   /* Progress must cover the season to date, not merely the day that happens to
      be selected in Today. Bounding this by activeIso made the view truncate:
@@ -5411,7 +5862,13 @@ function ProgressView({
   const avgBalance = daysWithFood ? Math.round(sumBalance / daysWithFood) : null;
   return /*#__PURE__*/React.createElement("div", {
     className: "space-y-4"
-  }, /*#__PURE__*/React.createElement(Card, {
+  }, /*#__PURE__*/React.createElement(CoachAnalysis, {
+    rollups: rollups,
+    state: state,
+    cutoff: cutoff,
+    saveCoachReport: saveCoachReport,
+    deleteCoachReport: deleteCoachReport
+  }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-baseline justify-between flex-wrap gap-3"
