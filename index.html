@@ -3003,6 +3003,144 @@ const bmr = (weightKg, profile) => {
   return Math.round(10 * w + 6.25 * p.heightCm - 5 * p.age + (p.sex === "female" ? -161 : 5));
 };
 
+/* ================= PERIODIZED FUELLING =================
+   A protein floor to protect lean mass in a deficit, plus a calorie/carb target
+   that adapts to (a) the athlete's real maintenance, reverse-engineered from the
+   scale where possible, and (b) the day's training demand — take the deficit on
+   rest days, fuel the hard/long days. All figures are coaching guides, ±15%. */
+const DEFAULT_FUEL = {
+  proteinPerKg: 1.8,        // g/kg bodyweight — protective in a deficit for a masters endurance athlete
+  goalRateKgPerWeek: 0.4,   // target loss during the build; forced to 0 in the maintenance phase
+  neatFactor: 1.35,         // BMR multiplier for non-exercise maintenance when the scale can't tell us yet
+  autoDigest: true
+};
+const normFuel = f => ({
+  proteinPerKg: Math.min(2.6, Math.max(1.2, num(f && f.proteinPerKg) || DEFAULT_FUEL.proteinPerKg)),
+  goalRateKgPerWeek: Math.min(1.0, Math.max(0, (f && f.goalRateKgPerWeek != null) ? num(f.goalRateKgPerWeek) : DEFAULT_FUEL.goalRateKgPerWeek)),
+  neatFactor: Math.min(1.7, Math.max(1.15, num(f && f.neatFactor) || DEFAULT_FUEL.neatFactor)),
+  autoDigest: !(f && f.autoDigest === false)
+});
+/* Per day-kind: carbohydrate g/kg, how much of the session's burn to eat back,
+   and how much of the base deficit to apply (rest days carry it, hard days don't). */
+const FUEL_STANCE = {
+  race:     { carbPerKg: 6.0, fuelBack: 1.0, deficitMult: 0.0, label: "Race fuel" },
+  long:     { carbPerKg: 5.0, fuelBack: 1.0, deficitMult: 0.3, label: "Fuel the long run" },
+  quality:  { carbPerKg: 4.5, fuelBack: 1.0, deficitMult: 0.3, label: "Fuel the hard session" },
+  ski:      { carbPerKg: 4.0, fuelBack: 0.8, deficitMult: 0.4, label: "Fuel the mountain day" },
+  strength: { carbPerKg: 3.5, fuelBack: 0.6, deficitMult: 0.7, label: "Support the lifting" },
+  easy:     { carbPerKg: 3.5, fuelBack: 0.5, deficitMult: 0.8, label: "Steady day" },
+  travel:   { carbPerKg: 3.0, fuelBack: 0.5, deficitMult: 1.0, label: "Travel \u2014 lighter day" },
+  rest:     { carbPerKg: 2.5, fuelBack: 0.4, deficitMult: 1.0, label: "Rest \u2014 leanest day" }
+};
+const MAINT_PHASE_START = "2027-03-01"; // after this the plan holds weight: no deficit, fuel the taper/race
+
+/* Best estimate of NON-exercise maintenance (kcal/day). Prefer the scale-derived
+   TDEE (intake minus weight-change energy) over the last ~28 logged days, backing
+   out average session burn; fall back to BMR x NEAT until there's enough data. */
+function estimateMetabolism(rollups, state, uptoIso) {
+  const prof = state.profile;
+  const fuel = normFuel(state.fuel);
+  const days = ALL_DAYS.filter(d => d.d <= uptoIso);
+  let weightKg = 100;
+  for (const d of days) { const w = num(rollups[d.d] && rollups[d.d].morning && rollups[d.d].morning.weight); if (w > 40) weightKg = w; }
+  const bmrV = bmr(weightKg, prof);
+  let restMaintenance = Math.round(bmrV * fuel.neatFactor), source = "bmr", tdee = null;
+  const recent = days.slice(-28);
+  const wPts = recent.map(d => ({ d: d.d, w: num(rollups[d.d] && rollups[d.d].morning && rollups[d.d].morning.weight) })).filter(x => x.w > 40);
+  const foodDays = recent.filter(d => num(rollups[d.d] && rollups[d.d].intake) > 0);
+  if (wPts.length >= 2 && foodDays.length >= 4) {
+    const first = wPts[0], last = wPts[wPts.length - 1];
+    const span = Math.max(1, Math.round((fromIso(last.d) - fromIso(first.d)) / DAY));
+    if (span >= 7) {
+      const avgIntake = foodDays.reduce((a, d) => a + num(rollups[d.d].intake), 0) / foodDays.length;
+      const dPerDay = (last.w - first.w) * 7700 / span; // kcal/day implied by the scale
+      tdee = Math.round(avgIntake - dPerDay);
+      const avgSess = foodDays.reduce((a, d) => a + num(rollups[d.d].actKcal), 0) / foodDays.length;
+      const est = Math.round(tdee - avgSess);
+      if (est > bmrV * 1.05 && est < bmrV * 1.9) { restMaintenance = est; source = "scale"; }
+    }
+  }
+  return { restMaintenance, source, weightKg, bmr: bmrV, tdee };
+}
+
+/* Targets for a single day. sessionKcalRef = that day's planned (future/today) or
+   actual (past) training burn. Deficit lands mostly on rest days; carbs and the
+   eat-back scale with the session. */
+function fuelTargets(dayKind, weightKg, profile, fuelCfg, restMaintenance, sessionKcalRef, dIso) {
+  const fuel = normFuel(fuelCfg);
+  const st = FUEL_STANCE[dayKind] || FUEL_STANCE.easy;
+  const inMaintenance = !!(dIso && dIso >= MAINT_PHASE_START);
+  const baseDeficit = inMaintenance ? 0 : fuel.goalRateKgPerWeek * 7700 / 7;
+  const dayDeficit = Math.round(baseDeficit * st.deficitMult);
+  const fuelBack = Math.round((num(sessionKcalRef) || 0) * st.fuelBack);
+  const p = normProfile(profile);
+  const bmrV = bmr(weightKg, profile);
+  const floor = Math.max(p.sex === "female" ? 1300 : 1500, Math.round(bmrV * 1.1));
+  const kcal = Math.max(floor, Math.round(restMaintenance - dayDeficit + fuelBack));
+  const protein_g = Math.round(fuel.proteinPerKg * weightKg);
+  const carbs_g = Math.round(st.carbPerKg * weightKg);
+  const fatFloor = Math.round(0.6 * weightKg);
+  const fat_g = Math.max(fatFloor, Math.round((kcal - protein_g * 4 - carbs_g * 4) / 9));
+  return {
+    kind: dayKind, stance: st.label, kcal,
+    reconKcal: protein_g * 4 + carbs_g * 4 + fat_g * 9,
+    protein_g, carbs_g, fat_g,
+    restMaintenance: Math.round(restMaintenance), deficit: dayDeficit, fuelBack,
+    inMaintenance, proteinPerKg: fuel.proteinPerKg, source: null
+  };
+}
+
+/* Logged macros/intake for one rollup day. */
+function loggedMacros(r) {
+  const items = (r && r.food && r.food.items) || [];
+  const m = items.reduce((a, it) => ({ c: a.c + Math.max(0, num(it.carbs)), p: a.p + Math.max(0, num(it.protein)), f: a.f + Math.max(0, num(it.fat)) }), { c: 0, p: 0, f: 0 });
+  return { intake: num(r && r.intake), carbs: m.c, protein: m.p, fat: m.f };
+}
+
+/* Season-to-date fuelling adherence vs the periodized targets. */
+function buildFuelAdherence(rollups, state, cutoff, metab) {
+  const prof = state.profile, fuel = normFuel(state.fuel);
+  const days = ALL_DAYS.filter(d => d.d <= cutoff);
+  let latestW = metab.weightKg;
+  let pDaysMet = 0, pDaysAny = 0, sumProtG = 0, sumProtKg = 0;
+  let calWithin = 0, calDays = 0, sumIntake = 0, sumTarget = 0;
+  let hardCarb = 0, hardN = 0, restCarb = 0, restN = 0;
+  days.forEach(d => {
+    const r = rollups[d.d]; if (!r) return;
+    const w = num(r.morning && r.morning.weight); if (w > 40) latestW = w;
+    if (!(num(r.intake) > 0)) return;
+    const lm = loggedMacros(r);
+    const sessRef = num(r.actKcal);
+    const t = fuelTargets(d.k, latestW, prof, fuel, metab.restMaintenance, sessRef, d.d);
+    // protein
+    pDaysAny++;
+    if (lm.protein >= 0.9 * t.protein_g) pDaysMet++;
+    sumProtG += lm.protein; sumProtKg += lm.protein / latestW;
+    // calories within +/-15% of target
+    calDays++; sumIntake += lm.intake; sumTarget += t.kcal;
+    if (Math.abs(lm.intake - t.kcal) <= 0.15 * t.kcal) calWithin++;
+    // periodization: carbs on hard vs rest days
+    if (d.k === "quality" || d.k === "long" || d.k === "race") { hardCarb += lm.carbs; hardN++; }
+    if (d.k === "rest" || d.k === "travel") { restCarb += lm.carbs; restN++; }
+  });
+  if (!pDaysAny) return null;
+  return {
+    proteinTarget_gPerKg: fuel.proteinPerKg,
+    proteinDaysMet: pDaysMet, proteinDaysLogged: pDaysAny,
+    proteinMetPct: Math.round(100 * pDaysMet / pDaysAny),
+    avgProtein_g: Math.round(sumProtG / pDaysAny),
+    avgProtein_gPerKg: Math.round(sumProtKg / pDaysAny * 100) / 100,
+    calorieDaysWithinTarget: calWithin, calorieDaysLogged: calDays,
+    calorieAdherencePct: calDays ? Math.round(100 * calWithin / calDays) : null,
+    avgIntake_kcal: calDays ? Math.round(sumIntake / calDays) : null,
+    avgTarget_kcal: calDays ? Math.round(sumTarget / calDays) : null,
+    avgCarbsHardDays_g: hardN ? Math.round(hardCarb / hardN) : null,
+    avgCarbsRestDays_g: restN ? Math.round(restCarb / restN) : null,
+    periodizationOk: (hardN && restN) ? (hardCarb / hardN) > (restCarb / restN) : null,
+    maintenanceSource: metab.source, restMaintenance_kcal: metab.restMaintenance
+  };
+}
+
 /* Call Claude API to convert a free-form food description into a structured calorie estimate.
    Returns {items:[{name, qty, kcal}], total, note} or throws on parse failure. */
 async function analyseFoodText(text) {
@@ -3324,10 +3462,19 @@ function buildProgressSummary(rollups, state, cutoff) {
   const prev7 = days.filter(d => { const g = Math.round((fromIso(cutoff) - fromIso(d.d)) / DAY); return g >= 7 && g < 14; });
   const momentum = { last7Days: bucket(last7), previous7Days: bucket(prev7) };
 
+  /* --- periodized fuelling: real maintenance + protein/target adherence --- */
+  const metab = estimateMetabolism(rollups, state, cutoff);
+  const fuelling = buildFuelAdherence(rollups, state, cutoff, metab);
+  const metabolism = {
+    weightKg: metab.weightKg, bmrKcal: metab.bmr,
+    restMaintenanceKcal: metab.restMaintenance, source: metab.source,
+    estimatedTDEE_kcal: metab.tdee
+  };
+
   return {
     period: { from: firstLogged, to: lastLogged, days: spanDays, weeksCovered, generatedAt: new Date().toISOString() },
     goals: { race12k: "2027-04-04", halfMarathon: "2027-05-09" },
-    weight, training, energy, recovery, races, momentum
+    weight, training, energy, recovery, races, momentum, metabolism, fuelling
   };
 }
 
@@ -3341,17 +3488,17 @@ async function analyseProgress(summary, prevReports) {
     ? "\n\nFor continuity, here are the dates and headlines of the previous reports (oldest first) so you can note what has changed since — do NOT repeat them verbatim:\n" +
       prevReports.slice().reverse().map(r => `- ${(r.at || "").slice(0, 10)}: ${(r.headline || (r.text || "").slice(0, 90)).replace(/\s+/g, " ")}`).join("\n")
     : "";
-  const prompt = `You are a Senior Training Coach and sports physiologist with 25 years guiding endurance athletes. You specialise in the interplay of running performance, metabolism and body composition. You are analysing one athlete preparing for a 12K (4 Apr 2027) and a half marathon (9 May 2027).
+  const prompt = `You are a two-person team advising one athlete: a Senior Training Coach / sports physiologist and a Senior Sports Nutritionist, each with 25 years' experience with endurance athletes. Speak with one unified voice. The athlete is preparing for a 12K (4 Apr 2027) and a half marathon (9 May 2027).
 
-Below is a JSON snapshot of everything they have logged so far — training load, energy balance, macros, weight trend, recovery markers, race results and recent momentum. Effort is a unitless internal index (MET × hours × RPE). "Balance" is intake minus total burn (BMR + sessions): negative = deficit. Calorie figures are estimates (±15%).
+Below is a JSON snapshot of everything they have logged so far — training load, energy balance, macros, weight trend, recovery markers, race results, recent momentum, an estimate of their real maintenance metabolism, and how well they are hitting their periodized fuelling targets. Effort is a unitless internal index (MET × hours × RPE). "Balance" is intake minus total burn (BMR + sessions): negative = deficit. The "metabolism" block gives restMaintenanceKcal (non-exercise maintenance; source "scale" means reverse-engineered from their weight trend, "bmr" means a formula prior until there's enough data). The "fuelling" block scores adherence to a protein floor (proteinTarget_gPerKg) and to a training-day-aware calorie target, and whether carbs are periodized (higher on hard days than rest days). Calorie figures are estimates (±15%).
 
 Write the athlete a coaching report in plain, natural language — the way you would actually talk to them. Cover, weaving them together rather than as a checklist:
 1. Headline: are they progressing, holding, or slipping — and on what evidence.
-2. Body composition & metabolism: read the weight trend against the energy balance. Is the rate of loss sensible for someone still training hard, or too aggressive / too slow? Flag any deficit that threatens training quality or muscle.
+2. Body composition & metabolism: read the weight trend against the energy balance and the estimated maintenance. Is the rate of loss sensible for someone still training hard, or too aggressive / too slow? Flag any deficit that threatens training quality or muscle.
 3. Training: volume, consistency/compliance, and the high-vs-low intensity mix (are they respecting easy days?).
-4. Fuelling: is intake and macro split (esp. protein and carbs) supporting the work and the race goals?
+4. Fuelling (nutritionist's lens): are they hitting the protein floor (call out avgProtein_gPerKg vs target and proteinMetPct)? Is total intake tracking the periodized target, and are carbs actually higher on hard/long days than rest days? Name specific gaps.
 5. Recovery: what RHR, sleep and energy trends suggest about fatigue.
-6. The two or three things that matter most for the next block, as specific, actionable coach's orders.
+6. The two or three things that matter most for the next block, as specific, actionable orders (a mix of training and fuelling).
 
 Rules:
 - Be honest and specific; cite the athlete's own numbers. Encouraging but not a cheerleader — name problems plainly.
@@ -3386,6 +3533,83 @@ ${JSON.stringify(summary)}`;
   return { text, headline, model: __model };
 }
 
+/* ================= WEEKLY DIGEST =================
+   Distil one plan-week (Mon–Sun) into a compact snapshot for a short auto digest.
+   `prevWeek` is the previous week's snapshot so we can show week-over-week deltas. */
+function buildWeekSummary(rollups, state, week, metab) {
+  const prof = state.profile, fuel = normFuel(state.fuel);
+  const dayRows = week.days.map(d => rollups[d.d]).filter(Boolean);
+  let trained = 0, planned = 0, effort = 0, planEffort = 0, hi = 0, lo = 0, sessKcal = 0, mins = 0;
+  let intakeSum = 0, burnSum = 0, foodDays = 0, protMet = 0, protAny = 0, protKgSum = 0;
+  const ws = [];
+  const actTally = {};
+  let latestW = metab.weightKg;
+  week.days.forEach(d => {
+    const r = rollups[d.d]; if (!r) return;
+    const w = num(r.morning && r.morning.weight); if (w > 40) { latestW = w; ws.push(w); }
+    if (num(r.planEffort) > 20) planned++;
+    if (r.sessions && r.sessions.length) {
+      trained++;
+      r.sessions.forEach(s => { const spec = ACTIVITIES[s.type] || ACTIVITIES.other; actTally[spec.label || s.type] = (actTally[spec.label || s.type] || 0) + 1; });
+    }
+    effort += num(r.actEffort); planEffort += num(r.planEffort);
+    hi += num(r.actHi); lo += num(r.actLo); sessKcal += num(r.actKcal); mins += num(r.actMin);
+    if (num(r.intake) > 0) {
+      foodDays++; intakeSum += num(r.intake); burnSum += num(r.totalBurn);
+      const lm = loggedMacros(r);
+      const t = fuelTargets(d.k, latestW, prof, fuel, metab.restMaintenance, num(r.actKcal), d.d);
+      protAny++; protKgSum += lm.protein / latestW;
+      if (lm.protein >= 0.9 * t.protein_g) protMet++;
+    }
+  });
+  const topAct = Object.keys(actTally).sort((a, b) => actTally[b] - actTally[a])[0] || null;
+  return {
+    weekNo: week.n, phase: (PLAN.phases[week.ph] && PLAN.phases[week.ph].name) || week.ph,
+    from: week.days[0].d, to: week.days[6].d,
+    focus: week.fo || "",
+    daysTrained: trained, daysPlanned: planned,
+    compliancePct: planned ? Math.round(100 * trained / planned) : null,
+    minutes: Math.round(mins), effort: Math.round(effort), plannedEffort: Math.round(planEffort),
+    hiEffort: Math.round(hi), loEffort: Math.round(lo), sessionKcal: Math.round(sessKcal),
+    topActivity: topAct,
+    foodLoggedDays: foodDays,
+    avgIntakeKcal: foodDays ? Math.round(intakeSum / foodDays) : null,
+    avgBalanceKcal: foodDays ? Math.round((intakeSum - burnSum) / foodDays) : null,
+    proteinMetPct: protAny ? Math.round(100 * protMet / protAny) : null,
+    avgProtein_gPerKg: protAny ? Math.round(protKgSum / protAny * 100) / 100 : null,
+    meanWeightKg: ws.length ? Math.round(ws.reduce((a, b) => a + b, 0) / ws.length * 10) / 10 : null
+  };
+}
+
+/* Short auto weekly digest from the coach+nutritionist team. `prev` = prior week snapshot. */
+async function analyseWeek(weekSum, prev) {
+  const __key = (() => { try { return localStorage.getItem("anthropic_api_key") || ""; } catch (e) { return ""; } })().trim();
+  if (!__key) { const e = new Error("Add an Anthropic API key in AI settings first."); e.code = "NOKEY"; throw e; }
+  const __model = coachModel();
+  const prompt = `You are a Senior Endurance Coach and a Senior Sports Nutritionist writing a SHORT Monday digest to an athlete building toward a 12K (4 Apr 2027) and half marathon (9 May 2027). One unified voice.
+
+Here is last week's snapshot as JSON${prev ? ", plus the week before for comparison" : ""}. Effort is MET×hours×RPE. avgBalanceKcal negative = calorie deficit. proteinMetPct = share of food-logged days hitting the protein floor.
+
+Write 60–110 words, warm but candid: one line on how the week went (training + weight/fuelling together), one concrete win, one thing to fix next week. No headers, no bullet lists, no markdown tables. Start with a 3–6 word bold **lead-in** then a colon, then the digest. Use their real numbers. Do not invent data; if a whole area is blank, say what to log.
+
+THIS WEEK:
+${JSON.stringify(weekSum)}${prev ? "\n\nWEEK BEFORE:\n" + JSON.stringify(prev) : ""}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": __key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+    body: JSON.stringify({ model: __model, max_tokens: 500, messages: [{ role: "user", content: prompt }] })
+  });
+  if (!res.ok) {
+    let __m = "API " + res.status;
+    try { const j = await res.json(); if (j && j.error && j.error.message) __m = j.error.message; } catch (e) {}
+    const e = new Error(__m); if (res.status === 404) e.hint = "Model not found — check the coach model in AI settings."; throw e;
+  }
+  const data = await res.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+  if (!text) throw new Error("Empty response from the model.");
+  return { text, model: __model };
+}
+
 /* ---- CSV audit builder: one row per logged day, every stat, plus a totals row.
    Uploaded to Drive and converted to a real Google Sheet named coach-data-audit. */
 function csvCell(v) {
@@ -3397,13 +3621,18 @@ function buildAuditCsv(rollups, state, cutoff) {
   const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
     "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Balance kcal",
-    "Carbs g", "Protein g", "Fat g", "Act effort", "HI effort", "LO effort", "Notes"];
+    "Carbs g", "Protein g", "Fat g", "kcal target", "Protein tgt g", "Carb tgt g", "Protein met",
+    "Act effort", "HI effort", "LO effort", "Notes"];
+  const metab = estimateMetabolism(rollups, state, cutoff);
+  const prof = state.profile, fuelCfg = normFuel(state.fuel);
+  let auditW = metab.weightKg;
   const rows = [];
   let tKcal = 0, tBurn = 0, tIntake = 0, tEff = 0, tHi = 0, tLo = 0, tMin = 0, nTrain = 0, nFood = 0;
   ALL_DAYS.forEach(d => {
     if (d.d > cutoff) return;
     const r = rollups[d.d]; if (!r) return;
     const m = r.morning || {};
+    if (num(m.weight) > 40) auditW = num(m.weight);
     const sess = r.sessions || [];
     const food = r.food || {};
     const macro = (food.items || []).reduce((a, it) => ({ c: a.c + num(it.carbs), p: a.p + num(it.protein), f: a.f + num(it.fat) }), { c: 0, p: 0, f: 0 });
@@ -3422,20 +3651,24 @@ function buildAuditCsv(rollups, state, cutoff) {
     if (num(r.intake) > 0) nFood++;
     tKcal += num(r.actKcal); tBurn += num(r.totalBurn); tIntake += num(r.intake);
     tEff += num(r.actEffort); tHi += num(r.actHi); tLo += num(r.actLo);
+    const sessRef = num(r.actKcal) > 0 ? num(r.actKcal) : num(r.planKcal);
+    const t = fuelTargets(d.k, auditW, prof, fuelCfg, metab.restMaintenance, sessRef, d.d);
+    const protMet = num(r.intake) > 0 ? (macro.p >= 0.9 * t.protein_g ? "yes" : "no") : "";
     rows.push([
       d.d, WD[fromIso(d.d).getDay()], d.week, (PLAN.phases[d.ph] && PLAN.phases[d.ph].name) || d.ph || "",
       KIND_LABEL[d.k] || d.k || "", num(m.weight) > 40 ? _round(num(m.weight), 1) : "", m.rhr || "", m.sleep || "", m.energy || "",
       sess.length, detail, Math.round(num(r.actKcal)), Math.round(num(r.bmr)), Math.round(num(r.totalBurn)),
       num(r.intake) > 0 ? Math.round(num(r.intake)) : "", r.balance != null ? Math.round(num(r.balance)) : "",
       macro.c ? _round(macro.c, 0) : "", macro.p ? _round(macro.p, 0) : "", macro.f ? _round(macro.f, 0) : "",
+      t.kcal, t.protein_g, t.carbs_g, protMet,
       Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)), notes
     ]);
   });
   const totals = ["TOTALS / AVG", "", "", "", "", "", "", "", "",
     nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
     nFood ? Math.round(tIntake) : "", nFood ? Math.round(tIntake - tBurn) : "",
-    "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), ""];
-  const meta = "coach-data-audit  generated " + new Date().toISOString() + "  (calorie figures are MET-based estimates, ±15%)";
+    "", "", "", "", "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), ""];
+  const meta = "coach-data-audit  generated " + new Date().toISOString() + "  \u00b7 maintenance " + metab.restMaintenance + " kcal (" + metab.source + ")  \u00b7 calorie figures are estimates, \u00b115%";
   const lines = [];
   lines.push(csvCell(meta));
   lines.push(cols.map(csvCell).join(","));
@@ -3530,6 +3763,10 @@ const emptyState = {
   races: [],
   manual: 0,
   coachReports: [],
+  weeklyDigests: [],
+  fuel: {
+    ...DEFAULT_FUEL
+  },
   profile: {
     ...DEFAULT_PROFILE
   }
@@ -3834,6 +4071,34 @@ function App() {
       coachReports: (state.coachReports || []).filter(r => r.id !== id)
     });
   };
+  const setFuel = fuel => {
+    persist({
+      ...state,
+      fuel: normFuel(fuel)
+    });
+  };
+  /* saveDigest also carries the AUTO toggle (via {__setAuto}) so the digest card
+     can flip the setting without a second setter threaded through. */
+  const saveDigest = rep => {
+    if (rep && rep.__setAuto !== undefined) {
+      persist({
+        ...state,
+        fuel: normFuel({ ...normFuel(state.fuel), autoDigest: !!rep.__setAuto })
+      });
+      return;
+    }
+    const prev = state.weeklyDigests || [];
+    persist({
+      ...state,
+      weeklyDigests: [rep, ...prev].slice(0, 60)
+    });
+  };
+  const deleteDigest = id => {
+    persist({
+      ...state,
+      weeklyDigests: (state.weeklyDigests || []).filter(d => d.id !== id)
+    });
+  };
 
   /* ---------- per-day rollups (planned + actual) ---------- */
   const rollups = useMemo(() => {
@@ -3980,6 +4245,34 @@ function App() {
       wLogged
     };
   }, [state, activeIso, rollups]);
+  /* ---------- auto weekly digest ----------
+     Once, for the most recent completed plan week that has data and no digest yet,
+     write it automatically — but only with AUTO on and an API key present, and at
+     most one attempt per calendar day (so a failure doesn't hammer the API). */
+  const autoDigestRef = useRef(false);
+  useEffect(() => {
+    if (!state || !rollups) return;
+    const fuel = normFuel(state.fuel);
+    if (!fuel.autoDigest) return;
+    let key = ""; try { key = (localStorage.getItem("anthropic_api_key") || "").trim(); } catch (e) {}
+    if (!key) return;
+    const w = mostRecentCompletedWeek(todayIso);
+    if (!w) return;
+    const already = (state.weeklyDigests || []).some(d => d.weekNo === w.n && d.from === w.days[0].d);
+    if (already) return;
+    let last = ""; try { last = localStorage.getItem("last_auto_digest_day") || ""; } catch (e) {}
+    if (last === todayIso || autoDigestRef.current) return;
+    const metab = estimateMetabolism(rollups, state, w.days[6].d);
+    const sum = buildWeekSummary(rollups, state, w, metab);
+    if (!(sum.daysTrained > 0 || sum.foodLoggedDays > 0)) return;
+    autoDigestRef.current = true;
+    try { localStorage.setItem("last_auto_digest_day", todayIso); } catch (e) {}
+    const prevW = PLAN.weeks.find(x => x.n === w.n - 1);
+    const prevSum = prevW ? buildWeekSummary(rollups, state, prevW, metab) : null;
+    analyseWeek(sum, prevSum).then(out => {
+      saveDigest({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: new Date().toISOString(), weekNo: w.n, from: sum.from, to: sum.to, text: out.text, model: out.model, metrics: sum, auto: true });
+    }).catch(() => {}).finally(() => { autoDigestRef.current = false; });
+  }, [state, rollups, todayIso]);
   if (!state || !engine || !rollups) {
     return /*#__PURE__*/React.createElement("div", {
       className: "min-h-screen flex items-center justify-center",
@@ -4266,6 +4559,15 @@ function App() {
     onChange: food => patchDay(activeIso, {
       food
     })
+  }), /*#__PURE__*/React.createElement(FuelCard, {
+    rollups: rollups,
+    state: state,
+    activeIso: activeIso,
+    dayKind: day.k,
+    dayR: dayR,
+    log: log,
+    engine: engine,
+    onFuelChange: setFuel
   }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "DAY NOTES"), /*#__PURE__*/React.createElement("textarea", {
@@ -4403,7 +4705,9 @@ function App() {
     activeIso: activeIso,
     todayIso: todayIso,
     saveCoachReport: saveCoachReport,
-    deleteCoachReport: deleteCoachReport
+    deleteCoachReport: deleteCoachReport,
+    saveDigest: saveDigest,
+    deleteDigest: deleteDigest
   }), view === "tuning" && /*#__PURE__*/React.createElement(TuningView, {
     state: state,
     engine: engine,
@@ -5752,6 +6056,145 @@ function CoachAnalysis({ rollups, state, cutoff, saveCoachReport, deleteCoachRep
         )))));
 }
 
+/* ================= FUELLING (periodized targets) ================= */
+function MacroBar({ label, got, target, unit, color }) {
+  const h = React.createElement;
+  const pct = target > 0 ? Math.min(140, Math.round(100 * got / target)) : 0;
+  const met = target > 0 && got >= 0.9 * target;
+  const over = target > 0 && got > 1.15 * target;
+  return h("div", { className: "mt-2" },
+    h("div", { className: "flex items-baseline justify-between", style: mono },
+      h("span", { className: "text-xs uppercase tracking-wide text-gray-500" }, label),
+      h("span", { className: "text-xs", style: { color: "#4A524E" } },
+        h("b", { style: { color: got > 0 ? "#1C2321" : "#9AA6A0" } }, Math.round(got)), " / " + Math.round(target) + (unit || ""))),
+    h("div", { className: "mt-1 h-2 rounded", style: { background: "#ECEEE8", overflow: "hidden" } },
+      h("div", { style: { width: Math.min(100, pct) + "%", height: "100%", background: over ? "#B35F1E" : met ? "#2E7D4F" : color || "#8A9082", transition: "width .2s" } })));
+}
+function FuelCard({ rollups, state, activeIso, dayKind, dayR, log, engine, onFuelChange }) {
+  const h = React.createElement;
+  const [open, setOpen] = useState(false);
+  const fuel = normFuel(state.fuel);
+  const metab = useMemo(() => estimateMetabolism(rollups, state, activeIso), [rollups, state, activeIso]);
+  const weightKg = num(log && log.morning && log.morning.weight) > 40 ? num(log.morning.weight) : (engine && engine.avgW) || metab.weightKg;
+  const sessionRef = num(dayR.actKcal) > 0 ? num(dayR.actKcal) : num(dayR.planKcal);
+  const t = fuelTargets(dayKind, weightKg, state.profile, fuel, metab.restMaintenance, sessionRef, activeIso);
+  const lm = loggedMacros(dayR);
+  const kcalPct = t.kcal > 0 ? Math.round(100 * lm.intake / t.kcal) : 0;
+  const setF = patch => onFuelChange({ ...fuel, ...patch });
+  return h(Card, { className: "p-5", style: { borderColor: "#CFE0D4", background: "#F6FBF7" } },
+    h("div", { className: "flex items-baseline justify-between flex-wrap gap-2" },
+      h(Eyebrow, { color: "#2E7D4F" }, "FUELLING TARGET \u00B7 " + t.stance),
+      h("button", { onClick: () => setOpen(v => !v), className: "text-xs text-gray-500 px-2 py-1 rounded border", style: { borderColor: "#CFE0D4", ...mono } }, open ? "DONE" : "ADJUST")),
+    h("div", { className: "flex items-end gap-4 mt-2 flex-wrap" },
+      h("div", null,
+        h("div", { className: "text-2xl font-bold leading-tight", style: { ...mono, color: "#1C2321" } }, t.kcal.toLocaleString(),
+          h("span", { className: "text-sm font-normal text-gray-500" }, " kcal")),
+        h("div", { className: "text-xs text-gray-500", style: mono },
+          t.restMaintenance.toLocaleString() + " maint " + (t.deficit ? "\u2212" + t.deficit + " cut " : "") + (t.fuelBack ? "+" + t.fuelBack + " fuel-back" : (t.deficit ? "" : "\u00B7 hold")))),
+      lm.intake > 0 && h("div", { className: "text-xs", style: mono },
+        h("span", { className: "text-gray-500" }, "logged "), h("b", { style: { color: kcalPct > 115 ? "#B35F1E" : kcalPct >= 85 ? "#2E7D4F" : "#1C2321" } }, lm.intake.toLocaleString()),
+        h("span", { className: "text-gray-500" }, " (" + kcalPct + "% of target)"))),
+    h(MacroBar, { label: "Protein", got: lm.protein, target: t.protein_g, unit: " g", color: "#3B5670" }),
+    h("div", { className: "text-xs text-gray-500 mt-0.5", style: mono }, "\u2248 " + t.proteinPerKg + " g/kg \u00b7 the floor that protects muscle in a deficit"),
+    h(MacroBar, { label: "Carbs", got: lm.carbs, target: t.carbs_g, unit: " g", color: "#B35F1E" }),
+    h(MacroBar, { label: "Fat", got: lm.fat, target: t.fat_g, unit: " g", color: "#8A7A4E" }),
+    h("div", { className: "text-xs text-gray-500 mt-3 leading-relaxed" },
+      t.inMaintenance
+        ? "Maintenance phase \u2014 the scale's job is done, so today holds weight and fuels the work."
+        : "Carbs rise on hard and long days and ease back on rest days; the deficit sits mostly on rest days so quality sessions stay fuelled.",
+      metab.source === "scale" ? " Maintenance is tuned to your own weight trend." : " Maintenance is a starting estimate until a couple of weeks of weight + food are logged."),
+    open && h("div", { className: "mt-3 rounded border p-3", style: { borderColor: "#CFE0D4", background: "#fff" } },
+      h("div", { className: "flex items-end gap-3 flex-wrap" },
+        h("label", { className: "flex flex-col gap-1" },
+          h("span", { style: mono, className: "text-xs text-gray-500 uppercase tracking-wide" }, "Protein g/kg"),
+          h("input", { type: "number", step: "0.1", value: fuel.proteinPerKg, onChange: e => setF({ proteinPerKg: num(e.target.value) }), className: "w-24 px-2 py-1 rounded border text-sm", style: { borderColor: "#CFE0D4" } })),
+        h("label", { className: "flex flex-col gap-1" },
+          h("span", { style: mono, className: "text-xs text-gray-500 uppercase tracking-wide" }, "Goal loss kg/wk"),
+          h("input", { type: "number", step: "0.1", value: fuel.goalRateKgPerWeek, onChange: e => setF({ goalRateKgPerWeek: num(e.target.value) }), className: "w-24 px-2 py-1 rounded border text-sm", style: { borderColor: "#CFE0D4" } }))),
+      h("div", { className: "text-xs text-gray-400 mt-2 leading-relaxed" },
+        "Guides, not prescriptions. 1.6\u20132.2 g/kg protein suits a masters athlete in a cut; a 0.3\u20130.5 kg/week loss protects performance. In the maintenance phase the deficit is set to zero automatically. Anyone starting a deliberate cut is well served by a one-off check with a doctor or dietitian.")));
+}
+
+/* ================= FUELLING ADHERENCE (Progress) ================= */
+function FuelAdherence({ rollups, state, cutoff }) {
+  const h = React.createElement;
+  const metab = useMemo(() => estimateMetabolism(rollups, state, cutoff), [rollups, state, cutoff]);
+  const fa = useMemo(() => buildFuelAdherence(rollups, state, cutoff, metab), [rollups, state, cutoff, metab]);
+  if (!fa) return h(Empty, { msg: "Log food with macros for a few days and your fuelling adherence appears here." });
+  const pColor = fa.proteinMetPct >= 80 ? "#2E7D4F" : fa.proteinMetPct >= 50 ? "#B35F1E" : "#B3272D";
+  const cColor = fa.calorieAdherencePct != null && fa.calorieAdherencePct >= 60 ? "#2E7D4F" : "#B35F1E";
+  return h("div", null,
+    h(Eyebrow, null, "FUELLING TARGETS \u00B7 ADHERENCE"),
+    h("div", { className: "text-xs text-gray-500 mt-1" },
+      "Against your protein floor (" + fa.proteinTarget_gPerKg + " g/kg) and a training-day-aware calorie target built on " +
+      (fa.maintenanceSource === "scale" ? "your scale-tuned maintenance" : "an estimated maintenance") + " (" + fa.restMaintenance_kcal.toLocaleString() + " kcal rest-day)."),
+    h("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-6 mt-4" },
+      h(KPI, { label: "Protein days hit", value: fa.proteinMetPct + "%", sub: fa.proteinDaysMet + " / " + fa.proteinDaysLogged + " logged days", color: pColor }),
+      h(KPI, { label: "Avg protein", value: fa.avgProtein_gPerKg + " g/kg", sub: fa.avgProtein_g + " g/day", color: "#3B5670" }),
+      h(KPI, { label: "Calorie target hit", value: (fa.calorieAdherencePct != null ? fa.calorieAdherencePct + "%" : "\u2014"), sub: "within \u00B115% \u00b7 " + (fa.avgIntake_kcal || "\u2014") + " vs " + (fa.avgTarget_kcal || "\u2014"), color: cColor }),
+      h(KPI, { label: "Carb periodization", value: fa.periodizationOk == null ? "\u2014" : fa.periodizationOk ? "OK" : "FLAT", sub: (fa.avgCarbsHardDays_g != null ? "hard " + fa.avgCarbsHardDays_g + "g" : "hard \u2014") + " vs " + (fa.avgCarbsRestDays_g != null ? "rest " + fa.avgCarbsRestDays_g + "g" : "rest \u2014"), color: fa.periodizationOk ? "#2E7D4F" : "#8A6D3B" })),
+    fa.proteinMetPct < 60 && h("div", { className: "text-xs mt-3 rounded px-3 py-2 border", style: { background: "#FBF3E4", borderColor: "#E8D5AC", color: "#6B5A38" } },
+      "Protein is under target on most days. In a deficit that risks lean mass \u2014 anchor a protein source to every meal and aim first for the floor before anything else."));
+}
+
+/* ================= AUTO WEEKLY DIGEST ================= */
+function mostRecentCompletedWeek(todayIso) {
+  let pick = null;
+  PLAN.weeks.forEach(w => { if (w.days[6].d < todayIso) pick = w; });
+  return pick;
+}
+function WeeklyDigestCard({ rollups, state, todayIso, saveDigest, deleteDigest }) {
+  const h = React.createElement;
+  const digests = state.weeklyDigests || [];
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [openId, setOpenId] = useState(digests[0] ? digests[0].id : null);
+  const fuel = normFuel(state.fuel);
+  const week = mostRecentCompletedWeek(todayIso);
+  const haveForWeek = week && digests.some(d => d.weekNo === week.n && d.from === week.days[0].d);
+
+  const genFor = async (w) => {
+    setBusy(true); setErr("");
+    try {
+      const metab = estimateMetabolism(rollups, state, w.days[6].d);
+      const sum = buildWeekSummary(rollups, state, w, metab);
+      const prevW = PLAN.weeks.find(x => x.n === w.n - 1);
+      const prevSum = prevW ? buildWeekSummary(rollups, state, prevW, metab) : null;
+      const out = await analyseWeek(sum, prevSum);
+      const rep = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: new Date().toISOString(), weekNo: w.n, from: sum.from, to: sum.to, text: out.text, model: out.model, metrics: sum };
+      saveDigest(rep);
+      setOpenId(rep.id);
+    } catch (e) {
+      if (e && e.code === "NOKEY") setErr("Add your Anthropic API key first (Today \u2192 Food & Energy Balance \u2192 AI SETTINGS).");
+      else setErr((e && e.message ? e.message : "Digest failed") + (e && e.hint ? " \u2014 " + e.hint : ""));
+    } finally { setBusy(false); }
+  };
+
+  const toggleAuto = () => saveDigest({ __setAuto: !fuel.autoDigest });
+
+  return h(Card, { className: "p-5", style: { borderColor: "#C9D3DE", background: "#F7FAFC" } },
+    h("div", { className: "flex items-baseline justify-between flex-wrap gap-3" },
+      h(Eyebrow, { color: "#3B5670" }, "WEEKLY DIGEST"),
+      h("div", { className: "flex items-center gap-2 flex-wrap" },
+        h("button", { onClick: toggleAuto, className: "text-xs px-2 py-1 rounded border", style: { borderColor: "#C9D3DE", color: fuel.autoDigest ? "#2E7D4F" : "#8A9082", ...mono } },
+          "AUTO " + (fuel.autoDigest ? "ON" : "OFF")),
+        week && h("button", { onClick: () => genFor(week), disabled: busy, className: "px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40", style: { background: "#3B5670", ...mono } },
+          busy ? "WRITING\u2026" : haveForWeek ? "REWRITE WK " + week.n : "DIGEST WK " + week.n))),
+    h("div", { className: "text-sm text-gray-600 mt-2" },
+      "A short Monday note from the coach + nutritionist on the week just finished \u2014 how training and fuelling went together, one win, one fix. With AUTO on and an API key saved, it writes itself once each completed week."),
+    !week && h("div", { className: "text-xs text-gray-500 mt-2", style: mono }, "No completed plan week yet \u2014 the first digest lands after week 1 ends."),
+    err && h("div", { className: "text-sm text-red-700 mt-3" }, err),
+    digests.length > 0 && h("div", { className: "mt-4 divide-y", style: { borderColor: "#E6ECF1" } },
+      digests.map(d => h("div", { key: d.id, className: "py-2" },
+        h("div", { className: "flex items-center justify-between gap-2" },
+          h("button", { onClick: () => setOpenId(openId === d.id ? null : d.id), className: "text-left flex-1 min-w-0" },
+            h("span", { className: "text-xs text-gray-500 mr-2", style: mono }, "WK " + d.weekNo + " \u00b7 " + (d.from || "").slice(5) + "\u2013" + (d.to || "").slice(5)),
+            h("span", { className: "text-sm font-medium" }, "digest")),
+          h("button", { onClick: () => { if (deleteDigest) deleteDigest(d.id); if (openId === d.id) setOpenId(null); }, className: "text-xs text-gray-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50", title: "Delete" }, "\u2715")),
+        openId === d.id && h("div", { className: "mt-2 pl-1" }, renderCoachText(d.text),
+          h("div", { className: "text-xs text-gray-400 mt-2", style: mono }, (d.at ? fmtReportDate(d.at) : "") + (d.model ? " \u00b7 " + d.model : "")))))));
+}
+
 /* ================= PROGRESS VIEW — plan vs actual across whole period ================= */
 function ProgressView({
   rollups,
@@ -5759,7 +6202,9 @@ function ProgressView({
   activeIso,
   todayIso,
   saveCoachReport,
-  deleteCoachReport
+  deleteCoachReport,
+  saveDigest,
+  deleteDigest
 }) {
   /* Progress must cover the season to date, not merely the day that happens to
      be selected in Today. Bounding this by activeIso made the view truncate:
@@ -5868,6 +6313,12 @@ function ProgressView({
     cutoff: cutoff,
     saveCoachReport: saveCoachReport,
     deleteCoachReport: deleteCoachReport
+  }), /*#__PURE__*/React.createElement(WeeklyDigestCard, {
+    rollups: rollups,
+    state: state,
+    todayIso: todayIso,
+    saveDigest: saveDigest,
+    deleteDigest: deleteDigest
   }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement("div", {
@@ -6091,6 +6542,12 @@ function ProgressView({
     name: "cumulative intake (food)"
   }))))) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log food on any day (Today \u2192 Food & Energy Balance) and the balance appears here."
+  })), /*#__PURE__*/React.createElement(Card, {
+    className: "p-5"
+  }, /*#__PURE__*/React.createElement(FuelAdherence, {
+    rollups: rollups,
+    state: state,
+    cutoff: cutoff
   })), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(RecoveryTrend, {
