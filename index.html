@@ -7492,6 +7492,157 @@ function StatsTable({
 }
 
 /* ================= TUNING VIEW ================= */
+/* ================= YOUR BRIEF (as given, read-only) =================
+   The athlete's original request, cleaned into plain English and kept faithful
+   to the amended race calendar. Read-only record of the inputs the plan was
+   built from. */
+function BriefCard() {
+  const h = React.createElement;
+  const bullet = (k, txt) => h("div", { key: k, className: "flex gap-2 mt-1" },
+    h("span", { style: { color: "#9AA6A0", lineHeight: "1.5rem" } }, "\u2022"),
+    h("span", { className: "text-sm text-gray-700 leading-relaxed" }, txt));
+  const head = (label, color) => h("div", { className: "text-xs uppercase tracking-widest font-semibold mt-4 pt-3 border-t", style: { ...mono, color, borderColor: "#EDEFE9" } }, label);
+  return h(Card, { className: "p-5 md:col-span-2", style: { borderColor: "#C9D3DE", background: "#F7FAFC" } },
+    h("div", { className: "flex items-baseline justify-between flex-wrap gap-2" },
+      h(Eyebrow, { color: "#3B5670" }, "YOUR BRIEF \u00B7 AS GIVEN"),
+      h("span", { className: "text-xs text-gray-500", style: mono }, "read-only")),
+    h("div", { className: "text-sm text-gray-600 mt-2" },
+      "The starting point, goal and fixed commitments this plan was built from \u2014 recorded here as given, including the amended race calendar."),
+
+    head("STARTING POINT \u00B7 JULY 2026", "#3B5670"),
+    h("div", { className: "mt-1" },
+      bullet("s1", "105 kg, 191 cm tall."),
+      bullet("s2", "Strength: 2\u00D720 push-ups, 2\u00D720 squats, and a 2-minute plank."),
+      bullet("s3", h("span", null, "Running: 3 km + 1 km walk + 2 km, at roughly ", h("b", null, "6'50\"/km"), " when running."))),
+
+    head("GOAL", "#2E7D4F"),
+    h("div", { className: "mt-2 text-sm text-gray-700 leading-relaxed" },
+      "Build up smoothly and arrive able to race a half marathon, targeting ", h("b", null, "5'42\"/km"), " (a sub-2:00 half)."),
+
+    head("RACE CALENDAR (AMENDED)", "#B3272D"),
+    h("div", { className: "mt-1" },
+      bullet("r1", h("span", null, h("b", null, "10K"), " \u2014 Saturday 4 October 2026 (first checkpoint).")),
+      bullet("r2", h("span", null, h("b", null, "20K"), " \u2014 Saturday 22 November 2026.")),
+      bullet("r3", h("span", null, h("b", null, "12K"), " \u2014 Saturday 4 April 2027, around 5'20\"/km.")),
+      bullet("r4", h("span", null, h("b", null, "Half Marathon"), " \u2014 Saturday 9 May 2027, at 5'42\"/km."))),
+
+    head("FIXED COMMITMENTS & CONSTRAINTS", "#8A6D3B"),
+    h("div", { className: "mt-1" },
+      bullet("c1", "Travel 4\u201317 August 2026: little training possible \u2014 assume about three short, easy runs."),
+      bullet("c2", "Christmas, 25 December 2026 \u2013 6 January 2027: in the mountains with very little flat ground \u2014 uphill running and resistance only, no speed work; skiing 3\u20135 hours a day when the weather allows."),
+      bullet("c3", "Every Saturday and Sunday from 5 December 2026 to 7 April 2027: in the mountains, skiing about 5 hours a day."),
+      bullet("c4", "Weekends until 5 December 2026: tennis on Saturday and Sunday mornings (around 8\u20139) \u2014 easy, played with my wife, but it still takes time and tires the legs a little.")),
+
+    head("WHAT THE PLAN SHOULD DELIVER", "#5F7A5F"),
+    h("div", { className: "mt-1" },
+      bullet("d1", "A day-by-day plan that fits training around tennis, skiing, running and a bit of strength."),
+      bullet("d2", "A pace progression to aim at \u2014 starting near 6'50\"/km and using fartlek and speed work to move through about 6'20\", then 6'00\", and on toward race pace."),
+      bullet("d3", "A supporting diet, with the aim of losing 8\u201310 kg.")),
+
+    h("div", { className: "text-xs text-gray-500 mt-4 leading-relaxed" },
+      "A few working assumptions the plan adds on top of this brief: age is taken as 56 for the metabolic estimates; easy-run pace starts around 7'15\u20137'30\"/km \u2014 deliberately slower than the 6'50\" running tempo, so easy days stay genuinely easy; and the August travel block is written with four very short runs rather than three. Everything else follows the brief above."));
+}
+
+
+/* ================= PLAN OVERVIEW (targets & constraints, read-only) =================
+   The plan has no stored free-text brief; these targets/constraints are read
+   straight from the plan data (phases, weekly focus, pace ladder, per-day
+   nutrition notes) and the athlete's configured fuelling/weight settings. */
+function planPhaseRanges() {
+  const out = [];
+  Object.keys(PLAN.phases).forEach(key => {
+    const wks = PLAN.weeks.filter(w => w.ph === key);
+    if (!wks.length) return;
+    const first = wks[0], last = wks[wks.length - 1];
+    out.push({ key, name: PLAN.phases[key].name, weekFrom: first.n, weekTo: last.n, from: first.days[0].d, to: last.days[6].d, focus: first.fo || "" });
+  });
+  return out;
+}
+function planPaceLadder() {
+  const rows = []; let prev = null;
+  PLAN.weeks.forEach(w => { if (w.pa && w.pa !== prev) { rows.push({ n: w.n, from: w.days[0].d, pa: w.pa }); prev = w.pa; } });
+  return rows;
+}
+function planNutritionConstraints() {
+  const prot = new Set(); let noAlcohol = false, carbsRun = false, kcalMin = null, kcalMax = null;
+  PLAN.weeks.forEach(w => w.days.forEach(d => {
+    const nu = d.nu || "";
+    const mp = nu.match(/protein\s*~?\s*(\d{2,3})\s*g/i);
+    if (mp) prot.add(parseInt(mp[1]));
+    const mk = nu.match(/~?\s*([12],?\d{3})\s*kcal/i);
+    if (mk) { const v = parseInt(mk[1].replace(",", "")); if (v > 800 && v < 6000) { kcalMin = kcalMin == null ? v : Math.min(kcalMin, v); kcalMax = kcalMax == null ? v : Math.max(kcalMax, v); } }
+    if (/no alcohol/i.test(nu) || /sugary/i.test(nu)) noAlcohol = true;
+    if (/carbs?\s+around/i.test(nu)) carbsRun = true;
+  }));
+  const nums = [...prot].sort((a, b) => a - b);
+  return { proteinMin: nums[0], proteinMax: nums[nums.length - 1], noAlcohol, carbsRun, kcalMin, kcalMax };
+}
+function PlanOverview({ state, engine, todayIso }) {
+  const h = React.createElement;
+  const phases = useMemo(() => planPhaseRanges(), []);
+  const pace = useMemo(() => planPaceLadder(), []);
+  const nut = useMemo(() => planNutritionConstraints(), []);
+  const fuel = normFuel(state.fuel);
+  const seasonFrom = ALL_DAYS[0].d, seasonTo = ALL_DAYS[ALL_DAYS.length - 1].d;
+  const daysTo = t => Math.max(0, Math.round((fromIso(t) - fromIso(todayIso)) / DAY));
+  const sub = "text-xs uppercase tracking-widest font-semibold";
+  const Section = (label, color, children) => h("div", { className: "mt-4 pt-3 border-t", style: { borderColor: "#EDEFE9" } },
+    h("div", { style: { ...mono, color }, className: sub }, label), children);
+  return h(Card, { className: "p-5 md:col-span-2", style: { borderColor: "#D8D2C4", background: "#FCFBF7" } },
+    h("div", { className: "flex items-baseline justify-between flex-wrap gap-2" },
+      h(Eyebrow, { color: "#8A6D3B" }, "PLAN OVERVIEW \u00B7 TARGETS & CONSTRAINTS"),
+      h("span", { className: "text-xs text-gray-500", style: mono }, "Season 2026\u201327")),
+    h("div", { className: "text-sm text-gray-600 mt-2" },
+      "The shape of the whole plan in one place \u2014 the goal races, how the season is phased, how paces step up, and the nutrition and weight targets it's built around. Read-only, assembled from the plan itself."),
+
+    Section("GOAL RACES & WINDOW", "#B3272D",
+      h("div", { className: "mt-2 grid grid-cols-2 md:grid-cols-4 gap-4", style: mono },
+        h(KPI, { label: "12K race", value: "4 Apr 2027", sub: daysTo("2027-04-04") + " days out", color: "#1C2321" }),
+        h(KPI, { label: "Half marathon", value: "9 May 2027", sub: daysTo("2027-05-09") + " days out", color: "#B3272D" }),
+        h(KPI, { label: "Season window", value: fmtDate(seasonFrom), sub: "through " + fmtDate(seasonTo), color: "#3B5670" }),
+        h(KPI, { label: "Length", value: PLAN.weeks.length + " wks", sub: phases.length + " phases", color: "#5F7A5F" }))),
+
+    Section("PHASES", "#8A6D3B",
+      h("div", { className: "mt-2 divide-y", style: { borderColor: "#EDEFE9" } },
+        phases.map(p => h("div", { key: p.key, className: "py-2" },
+          h("div", { className: "flex items-baseline justify-between gap-3 flex-wrap" },
+            h("span", { className: "text-sm font-semibold", style: { color: "#5A4A25" } }, p.name),
+            h("span", { className: "text-xs text-gray-500", style: mono }, "wk " + p.weekFrom + (p.weekTo !== p.weekFrom ? "\u2013" + p.weekTo : "") + " \u00B7 " + fmtDate(p.from) + " \u2013 " + fmtDate(p.to))),
+          p.focus && h("div", { className: "text-xs text-gray-600 mt-0.5 leading-relaxed" }, p.focus))))),
+
+    pace.length > 0 && Section("PACE LADDER (EASY-PACE TARGETS)", "#3B5670",
+      h("div", { className: "mt-2 space-y-1" },
+        pace.map((r, i) => h("div", { key: i, className: "flex items-baseline gap-3 text-sm" },
+          h("span", { className: "text-xs text-gray-500 shrink-0", style: { ...mono, minWidth: "5.5rem" } }, "wk " + r.n + " \u00B7 " + fmtDate(r.from)),
+          h("span", { className: "text-gray-700" }, r.pa))))),
+
+    Section("NUTRITION & BODY-COMPOSITION TARGETS", "#2E7D4F",
+      h("div", { className: "mt-2 text-sm text-gray-700 leading-relaxed" },
+        h("div", null,
+          h("b", null, "Protein floor: "),
+          fuel.proteinPerKg + " g/kg bodyweight",
+          (nut.proteinMin ? " \u2014 the plan's daily notes target " + (nut.proteinMin === nut.proteinMax ? "~" + nut.proteinMin + " g" : nut.proteinMin + "\u2013" + nut.proteinMax + " g") + "." : ".")),
+        (nut.kcalMin != null) && h("div", { className: "mt-1" },
+          h("b", null, "Calorie band (plan notes): "), "roughly " + nut.kcalMin.toLocaleString() + "\u2013" + nut.kcalMax.toLocaleString() + " kcal/day depending on the day's training."),
+        h("div", { className: "mt-1" },
+          h("b", null, "Weight-loss target: "),
+          (fuel.goalRateKgPerWeek > 0 ? "~" + fuel.goalRateKgPerWeek + " kg/week during the build" : "maintenance (no deficit)"),
+          "; the deficit is set to zero from 1 Mar 2027, when the plan holds weight into the races.",
+          engine && engine.weightNote ? " " + engine.weightNote : ""),
+        h("div", { className: "mt-1" },
+          h("b", null, "Fuelling rules: "),
+          "carbs concentrated around hard and long runs" + (nut.carbsRun ? " (as the plan repeats daily)" : "") + "; " +
+          (nut.noAlcohol ? "limit alcohol and sugary drinks; " : "") +
+          "protein anchored to every meal to protect lean mass in a deficit."))),
+
+    Section("TRAINING PRINCIPLES", "#5F7A5F",
+      h("div", { className: "mt-2 text-sm text-gray-700 leading-relaxed" },
+        "Most running easy and conversational, with intensity reserved for the marked quality and long days; readiness (resting HR, sleep, energy) can downgrade a hard day to easy or rest. Race results and the manual dial re-tune every future pace target. Calorie and effort figures are estimates (\u00B115%), meant as a framework rather than a prescription.")),
+
+    h("div", { className: "text-xs text-gray-400 mt-4 leading-relaxed" },
+      "This overview is generated from the plan data and your current fuelling/weight settings \u2014 there isn't a separate saved brief. Anyone starting a deliberate cut is well served by a one-off check with a doctor or dietitian to anchor these numbers."));
+}
+
 function TuningView({
   state,
   engine,
@@ -7500,7 +7651,11 @@ function TuningView({
 }) {
   return /*#__PURE__*/React.createElement("div", {
     className: "grid md:grid-cols-2 gap-4"
-  }, /*#__PURE__*/React.createElement(Card, {
+  }, /*#__PURE__*/React.createElement(BriefCard, null), /*#__PURE__*/React.createElement(PlanOverview, {
+    state: state,
+    engine: engine,
+    todayIso: todayIso
+  }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "RACE & TIME-TRIAL RESULTS"), /*#__PURE__*/React.createElement("div", {
     className: "text-sm text-gray-600 mt-2"
