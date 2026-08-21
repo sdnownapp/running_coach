@@ -53,8 +53,16 @@ window.addEventListener("error", function (ev) {
   var METAK  = "coach_sync_meta";        // { updatedAt, fileId }
   var FLAGK  = "coach_sync_enabled";
   var CIDK   = "google_client_id";
-  var FILE   = "coach-data.json";
+  var FILE_DEFAULT  = "coach-data.json";
   var SCOPE  = "https://www.googleapis.com/auth/drive.file";
+
+  /* Filenames are user-configurable (stored per-device in localStorage). Names are
+     sanitised so they can't break the Drive `name='...'` query or path handling. */
+  function cleanName(v, def) {
+    v = (v == null ? "" : String(v)).replace(/['"\\/]/g, "").replace(/\s+/g, " ").trim();
+    return v || def;
+  }
+  function fileName() { try { return cleanName(localStorage.getItem("coach_json_name"), FILE_DEFAULT); } catch (e) { return FILE_DEFAULT; } }
 
   var S = { status: "disconnected", lastSynced: null, error: null };
   var listeners = [];
@@ -119,7 +127,7 @@ window.addEventListener("error", function (ev) {
     });
   }
   function findFile() {
-    var q = encodeURIComponent("name='" + FILE + "' and trashed=false");
+    var q = encodeURIComponent("name='" + fileName() + "' and trashed=false");
     return api("https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,modifiedTime)&q=" + q)
       .then(function (r) { return r.json(); })
       .then(function (j) { return (j.files && j.files[0]) || null; });
@@ -128,7 +136,7 @@ window.addEventListener("error", function (ev) {
   function createFile(str) {
     var b = "cs" + Date.now();
     var body = "--" + b + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
-      JSON.stringify({ name: FILE }) + "\r\n--" + b +
+      JSON.stringify({ name: fileName() }) + "\r\n--" + b +
       "\r\nContent-Type: application/json\r\n\r\n" + str + "\r\n--" + b + "--";
     return api("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
       { method: "POST", headers: { "Content-Type": "multipart/related; boundary=" + b }, body: body })
@@ -192,11 +200,12 @@ window.addEventListener("error", function (ev) {
      Uploaded as CSV with the Google Sheets mime type so Drive converts it into a
      real, human-readable spreadsheet. Uses the same drive.file scope/token as the
      JSON sync above; the app only ever sees files it created. */
-  var AUDIT = "coach-data-audit";
+  var AUDIT_DEFAULT = "coach-data-audit";
+  function auditName() { try { return cleanName(localStorage.getItem("coach_audit_name"), AUDIT_DEFAULT); } catch (e) { return AUDIT_DEFAULT; } }
   function multipartSheet(id, csv) {
     var b = "au" + Date.now();
     var meta = id ? { mimeType: "application/vnd.google-apps.spreadsheet" }
-                  : { name: AUDIT, mimeType: "application/vnd.google-apps.spreadsheet" };
+                  : { name: auditName(), mimeType: "application/vnd.google-apps.spreadsheet" };
     var body = "--" + b + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
       JSON.stringify(meta) + "\r\n--" + b +
       "\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n" + csv + "\r\n--" + b + "--";
@@ -206,7 +215,7 @@ window.addEventListener("error", function (ev) {
       .then(function (r) { return r.json(); });
   }
   function findAudit() {
-    var q = encodeURIComponent("name='" + AUDIT + "' and trashed=false");
+    var q = encodeURIComponent("name='" + auditName() + "' and trashed=false");
     return api("https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,webViewLink,modifiedTime)&q=" + q)
       .then(function (r) { return r.json(); })
       .then(function (j) { return (j.files && j.files[0]) || null; });
@@ -231,6 +240,10 @@ window.addEventListener("error", function (ev) {
     subscribe: function (cb) { listeners.push(cb); cb(this.get()); return function () { listeners = listeners.filter(function (f) { return f !== cb; }); }; },
     getClientId: clientId,
     setClientId: function (id) { try { localStorage.setItem(CIDK, (id || "").trim()); } catch (e) {} tokenClient = null; token = null; },
+    getFileName: function () { return fileName(); },
+    setFileName: function (v) { try { localStorage.setItem("coach_json_name", cleanName(v, FILE_DEFAULT)); } catch (e) {} },
+    getAuditName: function () { return auditName(); },
+    setAuditName: function (v) { try { localStorage.setItem("coach_audit_name", cleanName(v, AUDIT_DEFAULT)); } catch (e) {} },
     connect: function () {
       set({ status: "connecting", error: null });
       var self = this;
@@ -3762,6 +3775,7 @@ const emptyState = {
   logs: {},
   races: [],
   manual: 0,
+  title: "",
   coachReports: [],
   weeklyDigests: [],
   fuel: {
@@ -4249,6 +4263,10 @@ function App() {
      Once, for the most recent completed plan week that has data and no digest yet,
      write it automatically — but only with AUTO on and an API key present, and at
      most one attempt per calendar day (so a failure doesn't hammer the API). */
+  /* Reflect the plan title in the browser tab. */
+  useEffect(() => {
+    try { document.title = (state && state.title && state.title.trim()) ? state.title.trim() + " \u2014 Coach Board" : "Coach Board"; } catch (e) {}
+  }, [state && state.title]);
   const autoDigestRef = useRef(false);
   useEffect(() => {
     if (!state || !rollups) return;
@@ -4331,13 +4349,23 @@ function App() {
     className: "max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-end justify-between gap-3"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Eyebrow, {
     color: "#9AA6A0"
-  }, "SEASON 2026-27 \xB7 COACH BOARD"), /*#__PURE__*/React.createElement("div", {
-    className: "text-white text-xl font-bold mt-0.5"
-  }, "12K \xB7 4 Apr ", /*#__PURE__*/React.createElement("span", {
+  }, "SEASON 2026-27 \xB7 COACH BOARD"), /*#__PURE__*/React.createElement("input", {
+    value: state.title || "",
+    onChange: e => persist({
+      ...state,
+      title: e.target.value.slice(0, 80)
+    }),
+    placeholder: "12K \xB7 4 Apr | Half Marathon \xB7 9 May",
+    spellCheck: false,
+    "aria-label": "Plan title",
+    title: "Click to name your plan",
+    className: "text-white text-xl font-bold mt-0.5 bg-transparent outline-none w-full",
     style: {
-      color: "#9AA6A0"
+      border: "none",
+      minWidth: "14rem",
+      maxWidth: "36rem"
     }
-  }, "|"), " Half Marathon \xB7 9 May")), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-5",
     style: mono
   }, /*#__PURE__*/React.createElement("div", {
@@ -7933,6 +7961,8 @@ function DriveSyncCard() {
     status: "disconnected"
   });
   const [cid, setCid] = useState(() => avail ? window.CoachSync.getClientId() : "");
+  const [jsonName, setJsonName] = useState(() => avail && window.CoachSync.getFileName ? window.CoachSync.getFileName() : "coach-data.json");
+  const [auditName, setAuditName] = useState(() => avail && window.CoachSync.getAuditName ? window.CoachSync.getAuditName() : "coach-data-audit");
   useEffect(() => {
     if (avail) return window.CoachSync.subscribe(setSt);
   }, [avail]);
@@ -7966,6 +7996,28 @@ function DriveSyncCard() {
     w: "w-full",
     ph: "\\u2026apps.googleusercontent.com"
   })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 grid grid-cols-2 gap-3"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Sync file name",
+    value: jsonName,
+    onChange: v => {
+      setJsonName(v);
+      if (window.CoachSync.setFileName) window.CoachSync.setFileName(v);
+    },
+    w: "w-full",
+    ph: "coach-data.json"
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "Audit sheet name",
+    value: auditName,
+    onChange: v => {
+      setAuditName(v);
+      if (window.CoachSync.setAuditName) window.CoachSync.setAuditName(v);
+    },
+    w: "w-full",
+    ph: "coach-data-audit"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-gray-400 mt-1 leading-relaxed"
+  }, "These name the files in your Drive. Renaming points sync at a differently-named file (and the audit at a differently-named sheet): the next sync/export creates it and pushes your current data, leaving any existing files untouched."), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mt-3 flex-wrap"
   }, st.status !== "connected" ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
