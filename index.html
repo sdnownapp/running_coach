@@ -4467,6 +4467,9 @@ function App() {
     id: "progress",
     label: "PROGRESS"
   }), /*#__PURE__*/React.createElement(NavBtn, {
+    id: "objectives",
+    label: "PLAN OBJECTIVES & INSTRUCTIONS"
+  }), /*#__PURE__*/React.createElement(NavBtn, {
     id: "tuning",
     label: "RACES & TUNING"
   })), /*#__PURE__*/React.createElement("div", {
@@ -4654,6 +4657,16 @@ function App() {
       energy: v
     }),
     w: "w-full"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-3"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Location",
+    value: log.morning.location,
+    onChange: v => setMorning(activeIso, {
+      location: v
+    }),
+    w: "w-full",
+    ph: "e.g. home, mountains, hotel\u2026"
   })), /*#__PURE__*/React.createElement("label", {
     className: "flex items-center gap-2 mt-3 text-sm cursor-pointer select-none",
     style: mono
@@ -4740,6 +4753,10 @@ function App() {
     deleteCoachReport: deleteCoachReport,
     saveDigest: saveDigest,
     deleteDigest: deleteDigest
+  }), view === "objectives" && /*#__PURE__*/React.createElement(ObjectivesView, {
+    state: state,
+    engine: engine,
+    todayIso: todayIso
   }), view === "tuning" && /*#__PURE__*/React.createElement(TuningView, {
     state: state,
     engine: engine,
@@ -7675,10 +7692,12 @@ function PlanOverview({ state, engine, todayIso }) {
       "This overview is generated from the plan data and your current fuelling/weight settings \u2014 there isn't a separate saved brief. Anyone starting a deliberate cut is well served by a one-off check with a doctor or dietitian to anchor these numbers."));
 }
 
-function TuningView({
+/* ================= PLAN OBJECTIVES & INSTRUCTIONS =================
+   Houses the read-only brief (as given) and the plan overview (targets &
+   constraints), moved out of Races & Tuning into their own section. */
+function ObjectivesView({
   state,
   engine,
-  persist,
   todayIso
 }) {
   return /*#__PURE__*/React.createElement("div", {
@@ -7687,7 +7706,18 @@ function TuningView({
     state: state,
     engine: engine,
     todayIso: todayIso
-  }), /*#__PURE__*/React.createElement(Card, {
+  }));
+}
+
+function TuningView({
+  state,
+  engine,
+  persist,
+  todayIso
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "grid md:grid-cols-2 gap-4"
+  }, /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "RACE & TIME-TRIAL RESULTS"), /*#__PURE__*/React.createElement("div", {
     className: "text-sm text-gray-600 mt-2"
