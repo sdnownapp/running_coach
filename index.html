@@ -6348,6 +6348,28 @@ function ProgressView({
       burn: actPoint ? actPoint.burn : null
     };
   });
+  /* Per-day calorie burn split into BMR and exercise (session) burn. Kept on the
+     same food-logged-day basis as the intake-vs-burn card above so the two read
+     like-for-like. Labelled M/D for compactness. */
+  const dailyBurn = [];
+  ALL_DAYS.forEach(d => {
+    if (d.d > cutoff) return;
+    const r = rollups[d.d];
+    if (!r || !(r.intake > 0)) return; // only days with food logged
+    const mo = +d.d.slice(5, 7),
+      da = +d.d.slice(8, 10);
+    dailyBurn.push({
+      d: d.d,
+      label: `${mo}/${da}`,
+      bmr: Math.round(r.bmr),
+      exercise: Math.round(r.actKcal),
+      total: Math.round(r.totalBurn)
+    });
+  });
+  const burnDaysN = dailyBurn.length;
+  const avgBmr = burnDaysN ? Math.round(dailyBurn.reduce((a, x) => a + x.bmr, 0) / burnDaysN) : null;
+  const avgExercise = burnDaysN ? Math.round(dailyBurn.reduce((a, x) => a + x.exercise, 0) / burnDaysN) : null;
+  const avgTotalBurn = avgBmr != null ? avgBmr + avgExercise : null;
   const pct = (a, p) => p > 0 ? Math.round(100 * a / p) : 0;
   const eff_pct = pct(cA, pEff);
   const kcal_pct = pct(cAK, pKcal);
@@ -6591,6 +6613,72 @@ function ProgressView({
     name: "cumulative intake (food)"
   }))))) : /*#__PURE__*/React.createElement(Empty, {
     msg: "Log food on any day (Today \u2192 Food & Energy Balance) and the balance appears here."
+  })), /*#__PURE__*/React.createElement(Card, {
+    className: "p-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-baseline justify-between flex-wrap gap-3"
+  }, /*#__PURE__*/React.createElement(Eyebrow, null, "DAILY CALORIE BURN \xB7 BMR + EXERCISE"), /*#__PURE__*/React.createElement("span", {
+    style: mono,
+    className: "text-xs text-gray-500"
+  }, burnDaysN, " day", burnDaysN !== 1 ? "s" : "", " of food logged")), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-gray-500 mt-1"
+  }, "Total calories burned each day, split into resting metabolism (BMR) and burn from logged exercise sessions. Restricted to days you logged food, matching the card above, so each bar's total equals that day's total burn."), burnDaysN > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-4 mt-4",
+    style: mono
+  }, /*#__PURE__*/React.createElement(KPI, {
+    label: "Avg BMR / day",
+    value: avgBmr != null ? avgBmr.toLocaleString() : "\u2014",
+    sub: "resting burn",
+    color: "#3B5670"
+  }), /*#__PURE__*/React.createElement(KPI, {
+    label: "Avg exercise / day",
+    value: avgExercise != null ? avgExercise.toLocaleString() : "\u2014",
+    sub: "logged sessions",
+    color: "#B35F1E"
+  }), /*#__PURE__*/React.createElement(KPI, {
+    label: "Avg total burn / day",
+    value: avgTotalBurn != null ? avgTotalBurn.toLocaleString() : "\u2014",
+    sub: "BMR + exercise",
+    color: "#1C2321"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "h-72 mt-4"
+  }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: "100%"
+  }, /*#__PURE__*/React.createElement(BarChart, {
+    data: dailyBurn
+  }, /*#__PURE__*/React.createElement(CartesianGrid, {
+    stroke: "#EDEFE9"
+  }), /*#__PURE__*/React.createElement(XAxis, {
+    dataKey: "label",
+    tick: {
+      fontSize: 10,
+      fontFamily: "monospace"
+    },
+    interval: "preserveStartEnd",
+    minTickGap: 16
+  }), /*#__PURE__*/React.createElement(YAxis, {
+    tick: {
+      fontSize: 10,
+      fontFamily: "monospace"
+    },
+    width: 48
+  }), /*#__PURE__*/React.createElement(Tooltip, null), /*#__PURE__*/React.createElement(Legend, {
+    wrapperStyle: {
+      fontSize: 11
+    }
+  }), /*#__PURE__*/React.createElement(Bar, {
+    dataKey: "bmr",
+    stackId: "burn",
+    fill: "#3B5670",
+    name: "BMR burn"
+  }), /*#__PURE__*/React.createElement(Bar, {
+    dataKey: "exercise",
+    stackId: "burn",
+    fill: "#B35F1E",
+    name: "exercise burn"
+  }))))) : /*#__PURE__*/React.createElement(Empty, {
+    msg: "Log food on any day (Today \u2192 Food & Energy Balance) and the daily burn breakdown appears here."
   })), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(FuelAdherence, {
