@@ -3638,7 +3638,7 @@ function buildAuditCsv(rollups, state, cutoff) {
   const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
     "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Balance kcal",
     "Carbs g", "Protein g", "Fat g", "kcal target", "Protein tgt g", "Carb tgt g", "Protein met",
-    "Act effort", "HI effort", "LO effort", "Notes"];
+    "Act effort", "HI effort", "LO effort", "Followed plan", "Notes"];
   const metab = estimateMetabolism(rollups, state, cutoff);
   const prof = state.profile, fuelCfg = normFuel(state.fuel);
   let auditW = metab.weightKg;
@@ -3653,7 +3653,8 @@ function buildAuditCsv(rollups, state, cutoff) {
     const food = r.food || {};
     const macro = (food.items || []).reduce((a, it) => ({ c: a.c + num(it.carbs), p: a.p + num(it.protein), f: a.f + num(it.fat) }), { c: 0, p: 0, f: 0 });
     const notes = (state.logs[d.d] && state.logs[d.d].notes) || "";
-    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim());
+    const flag = (state.logs[d.d] && state.logs[d.d].adherence) || "";
+    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim()) || flag;
     if (!anyData) return;
     const detail = sess.map(s => {
       const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
@@ -3677,13 +3678,15 @@ function buildAuditCsv(rollups, state, cutoff) {
       num(r.intake) > 0 ? Math.round(num(r.intake)) : "", r.balance != null ? Math.round(num(r.balance)) : "",
       macro.c ? _round(macro.c, 0) : "", macro.p ? _round(macro.p, 0) : "", macro.f ? _round(macro.f, 0) : "",
       t.kcal, t.protein_g, t.carbs_g, protMet,
-      Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)), notes
+      Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)),
+      (flag && ADHERENCE[flag]) ? ADHERENCE[flag].label : "",
+      notes
     ]);
   });
   const totals = ["TOTALS / AVG", "", "", "", "", "", "", "", "",
     nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
     nFood ? Math.round(tIntake) : "", nFood ? Math.round(tIntake - tBurn) : "",
-    "", "", "", "", "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), ""];
+    "", "", "", "", "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), "", ""];
   const meta = "coach-data-audit  generated " + new Date().toISOString() + "  \u00b7 maintenance " + metab.restMaintenance + " kcal (" + metab.source + ")  \u00b7 calorie figures are estimates, \u00b115%";
   const lines = [];
   lines.push(csvCell(meta));
@@ -3960,7 +3963,9 @@ function pruneState(s) {
     const f = d.food;
     const hasFood = !!f && (num(f.total) > 0 || (f.items || []).length > 0);
     const hasNotes = !!(d.notes && String(d.notes).trim());
-    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes) {
+    const hasFlag = !!d.adherence;
+    const hasCoach = !!(d.coachNote && d.coachNote.text);
+    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes && !hasFlag && !hasCoach) {
       changed = true;
       return; // drop the fully-empty day entirely
     }
@@ -4035,7 +4040,9 @@ function App() {
     const f = d.food;
     const hasFood = !!f && (num(f.total) > 0 || (f.items || []).length > 0);
     const hasNotes = !!(d.notes && String(d.notes).trim());
-    return !hasMorning && !hasSessions && !hasFood && !hasNotes;
+    const hasFlag = !!d.adherence;
+    const hasCoach = !!(d.coachNote && d.coachNote.text);
+    return !hasMorning && !hasSessions && !hasFood && !hasNotes && !hasFlag && !hasCoach;
   };
   const patchDay = (dIso, patch) => {
     const cur = state.logs[dIso] || {
@@ -4554,7 +4561,15 @@ function App() {
       background: "#ECEEE8",
       color: "#4A524E"
     }
-  }, `paces ${engine.qDelta > 0 ? "+" : ""}${engine.qDelta}"/km`)), /*#__PURE__*/React.createElement("div", {
+  }, `paces ${engine.qDelta > 0 ? "+" : ""}${engine.qDelta}"/km`), log.adherence && ADHERENCE[log.adherence] && /*#__PURE__*/React.createElement("span", {
+    className: "text-xs px-2 py-0.5 rounded border font-semibold",
+    style: {
+      ...mono,
+      background: ADHERENCE[log.adherence].bg,
+      borderColor: ADHERENCE[log.adherence].border,
+      color: ADHERENCE[log.adherence].color
+    }
+  }, ADHERENCE[log.adherence].short)), /*#__PURE__*/React.createElement("div", {
     className: "text-base leading-relaxed font-medium"
   }, adjPlan), taskNote && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 text-sm rounded px-3 py-2 border font-medium",
@@ -4608,19 +4623,20 @@ function App() {
     log: log,
     engine: engine,
     onFuelChange: setFuel
-  }), /*#__PURE__*/React.createElement(Card, {
-    className: "p-5"
-  }, /*#__PURE__*/React.createElement(Eyebrow, null, "DAY NOTES"), /*#__PURE__*/React.createElement("textarea", {
-    value: log.notes || "",
-    onChange: e => patchDay(activeIso, {
-      notes: e.target.value
-    }),
-    placeholder: "How it felt, niggles, weather, anything worth remembering\u2026",
-    className: "w-full mt-2 px-3 py-2 rounded border text-sm min-h-[70px]",
-    style: {
-      borderColor: "#D6DAD2"
-    }
-  }))), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement(DayCoachCard, {
+    key: activeIso,
+    activeIso: activeIso,
+    day: day,
+    week: week,
+    log: log,
+    dayR: dayR,
+    ready: ready,
+    engine: engine,
+    state: state,
+    rollups: rollups,
+    todayIso: todayIso,
+    patchDay: patchDay
+  })), /*#__PURE__*/React.createElement("div", {
     className: "md:col-span-2 space-y-4"
   }, /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
@@ -6078,6 +6094,230 @@ function renderCoachText(text) {
     return h("p", { key: i, className: "text-sm leading-relaxed", style: { color: "#1C2321", marginTop: i ? "0.6rem" : 0 } }, nodes);
   });
 }
+/* ================= DAY COACH =================
+   Two things live here:
+   1. The adherence flag - did the athlete do the planned session, adapt it,
+      do something else entirely, or nothing at all. Stored per day as
+      log.adherence.
+   2. "Ask the coach" - sends the day's note plus everything logged around it
+      to the same Anthropic key the rest of the app uses, and gets back a short
+      reply from a senior coach. Saved per day as log.coachNote so it survives
+      a reload and can be re-read later. */
+const ADHERENCE = {
+  planned:   { label: "As planned",     short: "AS PLANNED",     color: "#2E7D4F", bg: "#E9F3EC", border: "#BFD9C8" },
+  adapted:   { label: "Adapted it",     short: "ADAPTED",        color: "#C08A1E", bg: "#FBF3E4", border: "#E8D5AC" },
+  different: { label: "Something else", short: "SOMETHING ELSE", color: "#3B5670", bg: "#EAF1F8", border: "#C3D3E2" },
+  missed:    { label: "Didn't train",   short: "DIDN'T TRAIN",   color: "#B3272D", bg: "#FAE9E7", border: "#E5B3AF" }
+};
+const ADHERENCE_ORDER = ["planned", "adapted", "different", "missed"];
+const ADHERENCE_MEANING = {
+  planned: "did the planned session essentially as written",
+  adapted: "did the planned session but changed it (shorter, easier, moved, or partly done)",
+  different: "trained, but did a different activity from the one planned",
+  missed: "did not train at all that day"
+};
+
+/* Everything the coach needs to read one day properly: the plan, what actually
+   happened, readiness, fuelling, the week around it, and the athlete's note. */
+function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state, rollups }) {
+  const metab = estimateMetabolism(rollups, state, activeIso);
+  const w = num(log.morning && log.morning.weight) > 40 ? num(log.morning.weight) : (engine.avgW || metab.weightKg);
+  const lm = loggedMacros(dayR);
+  const tgt = fuelTargets(day.k, w, state.profile, state.fuel, metab.restMaintenance, num(dayR.actKcal), activeIso);
+  const m = log.morning || {};
+  const sessions = (dayR.sessions || []).map(s => {
+    const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
+    const o = {
+      activity: spec.label || s.type,
+      minutes: Math.round(num(s.dur)),
+      rpe: num(s.rpe) || null,
+      kcal: Math.round(num(s.calc && s.calc.kcal)),
+      effortIndex: Math.round(num(s.calc && s.calc.effort)),
+      intensity: (s.calc && s.calc.hi) ? "high" : "low"
+    };
+    if (num(s.dist) > 0) {
+      o.km = num(s.dist);
+      if (num(s.dur) > 0) o.pace_per_km = secToPace(num(s.dur) * 60 / num(s.dist));
+    }
+    if (s.notes && String(s.notes).trim()) o.sessionNote = String(s.notes).trim();
+    return o;
+  });
+  const idx = ALL_DAYS.findIndex(d => d.d === activeIso);
+  const recent = ALL_DAYS.slice(Math.max(0, idx - 7), idx).map(d => {
+    const r = rollups[d.d] || {};
+    const l = state.logs[d.d] || {};
+    return {
+      date: d.d,
+      planned: KIND_LABEL[d.k] || d.k,
+      trained: !!(r.sessions && r.sessions.length),
+      effortIndex: Math.round(num(r.actEffort)),
+      followedPlan: l.adherence && ADHERENCE[l.adherence] ? ADHERENCE[l.adherence].label : null,
+      note: l.notes && String(l.notes).trim() ? String(l.notes).trim().slice(0, 160) : null
+    };
+  });
+  const daysTo = target => Math.round((fromIso(target) - fromIso(activeIso)) / DAY);
+  return {
+    date: activeIso,
+    dayOfWeek: fromIso(activeIso).toLocaleDateString("en-GB", { weekday: "long" }),
+    week: { number: week ? week.n : null, phase: week && PLAN.phases[week.ph] ? PLAN.phases[week.ph].name : null, focus: week ? (week.fo || "") : "" },
+    daysToRace12k: daysTo("2027-04-04"),
+    daysToHalfMarathon: daysTo("2027-05-09"),
+    planned: {
+      kind: KIND_LABEL[day.k] || day.k,
+      instruction: day.p || "",
+      km: day.km || 0,
+      effortIndex: Math.round(num(dayR.planEffort)),
+      kcal: Math.round(num(dayR.planKcal)),
+      nutritionNote: day.nu || ""
+    },
+    adherenceFlag: log.adherence && ADHERENCE[log.adherence]
+      ? { value: log.adherence, means: ADHERENCE_MEANING[log.adherence] }
+      : null,
+    morning: {
+      weightKg: num(m.weight) > 40 ? num(m.weight) : null,
+      restingHR: num(m.rhr) || null,
+      sleepHours: num(m.sleep) || null,
+      energy1to5: num(m.energy) || null,
+      waterLitres: num(m.water) || null
+    },
+    readiness: { flag: ready.level, reasons: ready.reasons || [], rhrBaseline: ready.base || null },
+    sessionsDone: sessions,
+    actual: {
+      sessionCount: sessions.length,
+      minutes: Math.round(num(dayR.actMin)),
+      effortIndex: Math.round(num(dayR.actEffort)),
+      highIntensityEffort: Math.round(num(dayR.actHi)),
+      lowIntensityEffort: Math.round(num(dayR.actLo)),
+      sessionKcal: Math.round(num(dayR.actKcal))
+    },
+    fuelling: num(dayR.intake) > 0 ? {
+      intakeKcal: Math.round(num(dayR.intake)),
+      totalBurnKcal: Math.round(num(dayR.totalBurn)),
+      balanceKcal: dayR.balance == null ? null : Math.round(num(dayR.balance)),
+      carbs_g: Math.round(lm.carbs), protein_g: Math.round(lm.protein), fat_g: Math.round(lm.fat),
+      target: { kcal: tgt.kcal, protein_g: tgt.protein_g, carbs_g: tgt.carbs_g, stance: tgt.stance }
+    } : { logged: false, target: { kcal: tgt.kcal, protein_g: tgt.protein_g, carbs_g: tgt.carbs_g, stance: tgt.stance } },
+    previous7Days: recent,
+    athletesNote: (log.notes || "").trim()
+  };
+}
+
+/* Ask the coach to read one day. Returns { text, model }. */
+async function analyseDayNote(ctx) {
+  const __key = (() => { try { return localStorage.getItem("anthropic_api_key") || ""; } catch (e) { return ""; } })().trim();
+  if (!__key) { const e = new Error("Add an Anthropic API key in AI settings first."); e.code = "NOKEY"; throw e; }
+  const __model = coachModel();
+  const prompt = `You are a Senior Training Coach with 25 years' experience with endurance athletes, reading one day of an athlete's log and replying to them directly. They are building toward a 12K on 4 April 2027 and a half marathon on 9 May 2027.
+
+Below is a JSON snapshot of ONE day: what the plan asked for, what they actually did, their morning readiness markers, how they fuelled, the week around it, and - most importantly - the note they wrote in their own words. "effortIndex" is a unitless internal index (MET x hours x RPE). "balanceKcal" is intake minus total burn (BMR + sessions); negative means a deficit. Calorie figures are estimates (±15%). "adherenceFlag" is the athlete's own answer to whether they did the planned session.
+
+Read their note and answer it the way a coach would in person.
+
+Cover, woven together rather than as a list:
+1. What they actually wrote - name the thing they described (the niggle, the fatigue, the good rhythm, the session that got away) and say what you make of it.
+2. How it reads against the day's numbers: planned versus done, readiness, effort, fuelling. Was this the right session for this day?
+3. One clear instruction for tomorrow or the next session.
+
+Rules:
+- Talk to them, not about them. Plain language, warm but candid. No headers, no bullet lists, no markdown tables.
+- 90-160 words. Be specific and cite their own numbers. Never invent data.
+- If the note is empty or very thin, say so briefly, tell them what is worth writing down next time, and coach off the numbers you do have.
+- If the adherence flag says they adapted the session, did something else, or did not train, address that head-on: was it a smart call or the start of a pattern?
+- Take pain, injury and illness seriously; advise conservatively and point them to a professional when it warrants. Do not diagnose.
+- Start with a 3-6 word bold **lead-in** followed by a colon, then the reply.
+
+THE DAY:
+${JSON.stringify(ctx)}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": __key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+    body: JSON.stringify({ model: __model, max_tokens: 700, messages: [{ role: "user", content: prompt }] })
+  });
+  if (!res.ok) {
+    let __m = "API " + res.status;
+    try { const j = await res.json(); if (j && j.error && j.error.message) __m = j.error.message; } catch (e) {}
+    const e = new Error(__m); if (res.status === 404) e.hint = "Model not found - check the coach model in AI settings."; throw e;
+  }
+  const data = await res.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+  if (!text) throw new Error("Empty response from the model.");
+  return { text, model: __model };
+}
+
+/* The Today-tab card: adherence flag, the free-text note, and the coach's reply. */
+function DayCoachCard({ activeIso, day, week, log, dayR, ready, engine, state, rollups, todayIso, patchDay }) {
+  const h = React.createElement;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const notes = log.notes || "";
+  const adh = log.adherence || "";
+  const fb = log.coachNote || null;
+  const isFutureDay = activeIso > todayIso;
+  const noteChanged = !!(fb && fb.note != null && fb.note !== notes.trim());
+
+  const setAdherence = v => patchDay(activeIso, { adherence: adh === v ? "" : v });
+
+  const ask = async () => {
+    setBusy(true); setErr("");
+    try {
+      const ctx = buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state, rollups });
+      const out = await analyseDayNote(ctx);
+      patchDay(activeIso, { coachNote: { at: new Date().toISOString(), text: out.text, model: out.model, note: notes.trim() } });
+    } catch (e) {
+      if (e && e.code === "NOKEY") setErr("Add your Anthropic API key first (Today \u2192 Food & Energy Balance \u2192 AI SETTINGS). The coach uses the same key.");
+      else setErr((e && e.message ? e.message : "The coach couldn't be reached") + (e && e.hint ? " \u2014 " + e.hint : ""));
+    } finally { setBusy(false); }
+  };
+
+  return h(Card, { className: "p-5" },
+    h(Eyebrow, null, "DAY NOTES"),
+    !isFutureDay && h("div", { className: "mt-3" },
+      h("div", { className: "text-xs uppercase tracking-wide text-gray-500", style: mono }, "Did you do the planned session?"),
+      h("div", { className: "flex flex-wrap gap-2 mt-2" },
+        ADHERENCE_ORDER.map(k => {
+          const a = ADHERENCE[k], on = adh === k;
+          return h("button", {
+            key: k, onClick: () => setAdherence(k),
+            className: "px-2.5 py-1 rounded border text-xs font-semibold transition-colors",
+            style: {
+              ...mono,
+              background: on ? a.bg : "#fff",
+              borderColor: on ? a.border : "#D6DAD2",
+              color: on ? a.color : "#6B7472"
+            }
+          }, a.short);
+        })),
+      adh && h("div", { className: "text-xs text-gray-500 mt-1.5" }, "Tap again to clear.")),
+    h("textarea", {
+      value: notes,
+      onChange: e => patchDay(activeIso, { notes: e.target.value }),
+      placeholder: "How it felt, niggles, weather, anything worth remembering\u2026",
+      className: "w-full mt-3 px-3 py-2 rounded border text-sm min-h-[80px]",
+      style: { borderColor: "#D6DAD2" }
+    }),
+    h("div", { className: "flex items-center gap-2 flex-wrap mt-2" },
+      h("button", {
+        onClick: ask, disabled: busy,
+        className: "px-4 py-1.5 rounded text-white text-sm font-semibold disabled:opacity-40",
+        style: { background: "#8A6D3B", ...mono }
+      }, busy ? "READING\u2026" : fb ? "ASK AGAIN" : "ASK THE COACH"),
+      fb && h("button", {
+        onClick: () => patchDay(activeIso, { coachNote: null }),
+        className: "text-xs text-gray-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50",
+        title: "Clear the coach's note"
+      }, "\u2715")),
+    h("div", { className: "text-xs text-gray-500 mt-2" },
+      "A senior coach reads this note alongside the day's plan, session, readiness and fuelling, then tells you what it means for the next one."),
+    err && h("div", { className: "text-sm text-red-700 mt-2" }, err),
+    fb && h("div", { className: "mt-3 rounded-lg border p-3", style: { borderColor: "#E6DFCD", background: "#FCFBF7" } },
+      h("div", { className: "flex items-baseline justify-between gap-2 flex-wrap" },
+        h(Eyebrow, { color: "#8A6D3B" }, "COACH ON THIS DAY"),
+        h("span", { className: "text-xs text-gray-400", style: mono }, fmtReportDate(fb.at))),
+      h("div", { className: "mt-2" }, renderCoachText(fb.text)),
+      noteChanged && h("div", { className: "text-xs text-gray-500 mt-2", style: mono },
+        "You've edited the note since \u2014 ask again for a fresh read.")));
+}
+
 function CoachAnalysis({ rollups, state, cutoff, saveCoachReport, deleteCoachReport }) {
   const h = React.createElement;
   const reports = state.coachReports || [];
