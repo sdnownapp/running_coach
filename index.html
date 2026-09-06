@@ -605,7 +605,9 @@ const {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  CartesianGrid
+  CartesianGrid,
+  Cell,
+  LabelList
 } = Recharts;
 
 /* ================= DATA (42 weeks, 20 Jul 2026 - 9 May 2027) ================= */
@@ -8182,6 +8184,175 @@ function ObjectivesView({
   }));
 }
 
+/* ================= LONG-RUN LADDER =================
+   The plan's week-by-week long-run targets, drawn as a ladder so the shape of
+   the build is visible at a glance: steps up through a block, a deliberate step
+   down on cutback weeks, and the four event weeks that everything else feeds.
+   Bars are the target; dots are the longest run actually logged that week, so
+   the chart stays honest rather than just restating the plan back. */
+const LADDER_COLORS = {
+  build:   { fill: "#3B5670", label: "Build" },
+  cutback: { fill: "#C08A1E", label: "Cutback" },
+  peak:    { fill: "#2E7D4F", label: "Peak long run" },
+  race:    { fill: "#B3272D", label: "Race / event" }
+};
+const RUN_TYPES = { run: 1, tapis_roulant: 1 };
+
+function buildLongRunLadder(state, todayIso) {
+  /* longest run logged in each week, from whatever is in the log */
+  const actualByWeek = {};
+  PLAN.weeks.forEach(w => {
+    let best = 0;
+    w.days.forEach(d => {
+      const l = (state.logs || {})[d.d];
+      ((l && l.sessions) || []).forEach(s => {
+        if (RUN_TYPES[s.type] && num(s.dist) > best) best = num(s.dist);
+      });
+    });
+    actualByWeek[w.n] = best;
+  });
+
+  const rows = [];
+  let prev = 0;
+  PLAN.weeks.forEach(w => {
+    let target = 0, longDay = null;
+    w.days.forEach(d => { if (num(d.km) > target) { target = num(d.km); longDay = d; } });
+    const raceDay = w.days.find(d => d.k === "race");
+    const type = raceDay ? "race" : (prev > 0 && target < prev ? "cutback" : "build");
+    rows.push({
+      w: "W" + w.n,
+      weekNo: w.n,
+      phase: (PLAN.phases[w.ph] && PLAN.phases[w.ph].name) || w.ph,
+      from: w.days[0].d,
+      to: w.days[6].d,
+      target: target || null,
+      type,
+      instruction: longDay ? longDay.p : "",
+      isRace: !!raceDay,
+      actual: actualByWeek[w.n] > 0 ? _round(actualByWeek[w.n], 1) : null,
+      isPast: w.days[6].d <= todayIso
+    });
+    if (target > 0) prev = target;
+  });
+
+  /* the biggest long run that is training rather than an event */
+  let peakKm = 0;
+  rows.forEach(r => { if (!r.isRace && num(r.target) > peakKm) peakKm = num(r.target); });
+  rows.forEach(r => { if (!r.isRace && num(r.target) === peakKm) r.type = "peak"; });
+  return { rows, peakKm };
+}
+
+function LadderTooltip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const r = payload[0].payload;
+  const delta = r.actual != null && r.target ? _round(r.actual - r.target, 1) : null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "rounded border px-3 py-2 text-xs shadow-sm",
+    style: { background: "#fff", borderColor: "#D6DAD2", maxWidth: 280, ...mono }
+  },
+    /*#__PURE__*/React.createElement("div", { className: "font-bold" },
+      "Week ", r.weekNo, " \u00b7 ", fmtDate(r.from)),
+    /*#__PURE__*/React.createElement("div", { className: "text-gray-500" }, r.phase),
+    /*#__PURE__*/React.createElement("div", { className: "mt-1.5" },
+      "target ", /*#__PURE__*/React.createElement("b", null, r.target ? r.target + " km" : "\u2014"),
+      "  \u00b7  ", LADDER_COLORS[r.type].label),
+    r.actual != null && /*#__PURE__*/React.createElement("div", {
+      style: { color: delta >= 0 ? "#2E7D4F" : "#B3272D" }
+    }, "longest run ", /*#__PURE__*/React.createElement("b", null, r.actual, " km"),
+      delta != null ? "  (" + (delta > 0 ? "+" : "") + delta + ")" : ""),
+    r.actual == null && r.isPast && /*#__PURE__*/React.createElement("div", { className: "text-gray-400" }, "no run logged"),
+    r.instruction && /*#__PURE__*/React.createElement("div", {
+      className: "mt-1.5 text-gray-600",
+      style: { fontFamily: "system-ui", whiteSpace: "normal" }
+    }, r.instruction));
+}
+
+function LongRunLadderCard({ state, todayIso }) {
+  const { rows, peakKm } = useMemo(() => buildLongRunLadder(state, todayIso), [state.logs, todayIso]);
+  const raceRows = rows.filter(r => r.isRace);
+  const next = rows.find(r => !r.isPast && r.target > 0);
+  const done = rows.filter(r => r.isPast && r.actual != null && r.target > 0);
+  const hit = done.filter(r => r.actual >= r.target - 0.4).length;
+  const longestActual = rows.reduce((a, r) => (r.actual != null && r.actual > a ? r.actual : a), 0);
+  const fmtKm = v => (v == null ? "" : (Math.round(v * 10) % 10 === 0 ? String(Math.round(v)) : v.toFixed(1)));
+
+  return /*#__PURE__*/React.createElement(Card, { className: "p-5 md:col-span-2" },
+    /*#__PURE__*/React.createElement(Eyebrow, null, "LONG-RUN LADDER \u00b7 42 WEEKS TO THE HALF"),
+    /*#__PURE__*/React.createElement("div", { className: "text-sm text-gray-600 mt-2" },
+      "Every week's longest planned run, in order. The steps up are the build; the amber steps down are cutback weeks, which are in the plan on purpose. Dots are the longest run you actually logged that week."),
+
+    /*#__PURE__*/React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-6 mt-4" },
+      /*#__PURE__*/React.createElement(KPI, {
+        label: "Peak long run", value: peakKm + " km",
+        sub: `week ${(rows.find(r => r.type === "peak") || {}).weekNo || "\u2014"} \u00b7 the biggest training run`,
+        color: "#2E7D4F"
+      }),
+      /*#__PURE__*/React.createElement(KPI, {
+        label: "Next target", value: next && next.target ? next.target + " km" : "\u2014",
+        sub: next ? `week ${next.weekNo} \u00b7 ${fmtDate(next.from)}` : "season complete",
+        color: "#3B5670"
+      }),
+      /*#__PURE__*/React.createElement(KPI, {
+        label: "Longest so far", value: longestActual ? longestActual + " km" : "\u2014",
+        sub: longestActual ? "your longest logged run" : "nothing logged yet",
+        color: "#B35F1E"
+      }),
+      /*#__PURE__*/React.createElement(KPI, {
+        label: "Targets hit", value: done.length ? `${hit} / ${done.length}` : "\u2014",
+        sub: "weeks where you reached the long run",
+        color: done.length && hit / done.length >= 0.7 ? "#2E7D4F" : "#1C2321"
+      })),
+
+    /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-gray-500 mt-4", style: mono
+    }, "Long run distance (km) \u2191"),
+    /*#__PURE__*/React.createElement("div", { className: "h-80 mt-1" },
+      /*#__PURE__*/React.createElement(ResponsiveContainer, { width: "100%", height: "100%" },
+        /*#__PURE__*/React.createElement(ComposedChart, {
+          data: rows, margin: { top: 22, right: 8, left: 0, bottom: 4 }
+        },
+          /*#__PURE__*/React.createElement(CartesianGrid, { stroke: "#EDEFE9", vertical: false }),
+          /*#__PURE__*/React.createElement(XAxis, {
+            dataKey: "w", tick: { fontSize: 9, fontFamily: "monospace" },
+            interval: "preserveStartEnd", minTickGap: 4
+          }),
+          /*#__PURE__*/React.createElement(YAxis, {
+            tick: { fontSize: 10, fontFamily: "monospace" }, width: 42,
+            domain: [0, 22], ticks: [0, 5, 10, 15, 20]
+          }),
+          /*#__PURE__*/React.createElement(Tooltip, { content: /*#__PURE__*/React.createElement(LadderTooltip, null), cursor: { fill: "#F3F4F0" } }),
+          /*#__PURE__*/React.createElement(Bar, { dataKey: "target", name: "long-run target (km)", radius: [2, 2, 0, 0], isAnimationActive: false },
+            rows.map((r, i) => /*#__PURE__*/React.createElement(Cell, {
+              key: i,
+              fill: LADDER_COLORS[r.type].fill,
+              fillOpacity: r.isPast ? 1 : 0.55
+            })),
+            /*#__PURE__*/React.createElement(LabelList, {
+              dataKey: "target", position: "top",
+              formatter: fmtKm,
+              style: { fontSize: 8, fontFamily: "monospace", fill: "#6B7472" }
+            })),
+          /*#__PURE__*/React.createElement(Line, {
+            type: "monotone", dataKey: "actual", name: "longest run logged (km)",
+            stroke: "#1C2321", strokeWidth: 1.5, connectNulls: false, isAnimationActive: false,
+            dot: { r: 2.5, fill: "#1C2321", strokeWidth: 0 }, activeDot: { r: 4 }
+          }))),
+    ),
+
+    /*#__PURE__*/React.createElement("div", { className: "flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-gray-500", style: mono },
+      Object.keys(LADDER_COLORS).map(k => /*#__PURE__*/React.createElement("span", { key: k, className: "flex items-center gap-1.5" },
+        /*#__PURE__*/React.createElement("span", { style: { width: 10, height: 10, background: LADDER_COLORS[k].fill, borderRadius: 2, display: "inline-block" } }),
+        LADDER_COLORS[k].label)),
+      /*#__PURE__*/React.createElement("span", { className: "flex items-center gap-1.5" },
+        /*#__PURE__*/React.createElement("span", { style: { width: 10, height: 10, background: "#1C2321", borderRadius: 999, display: "inline-block" } }),
+        "your longest run"),
+      /*#__PURE__*/React.createElement("span", { className: "text-gray-400" }, "faded bars are still ahead of you")),
+
+    /*#__PURE__*/React.createElement("div", { className: "mt-3 text-xs text-gray-600 flex flex-wrap gap-x-5 gap-y-1", style: mono },
+      raceRows.map(r => /*#__PURE__*/React.createElement("span", { key: r.weekNo },
+        /*#__PURE__*/React.createElement("b", null, r.target, " km"), " \u00b7 W", r.weekNo, " \u00b7 ", fmtDate(r.from)))));
+}
+
 function TuningView({
   state,
   engine,
@@ -8190,7 +8361,10 @@ function TuningView({
 }) {
   return /*#__PURE__*/React.createElement("div", {
     className: "grid md:grid-cols-2 gap-4"
-  }, /*#__PURE__*/React.createElement(Card, {
+  }, /*#__PURE__*/React.createElement(LongRunLadderCard, {
+    state: state,
+    todayIso: todayIso
+  }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "RACE & TIME-TRIAL RESULTS"), /*#__PURE__*/React.createElement("div", {
     className: "text-sm text-gray-600 mt-2"
