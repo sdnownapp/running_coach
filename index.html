@@ -3633,10 +3633,40 @@ function csvCell(v) {
   const s = String(v);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
+/* One-cell summary of everything eaten on a day, grouped by meal in the order
+   the app shows them, with unassigned items last:
+     "Breakfast: porridge (80 g) 450 kcal; coffee 5 kcal | Lunch: ..."
+   Falls back to the raw text the athlete typed when nothing has been parsed
+   into items yet, so a day logged but never parsed still lands in the sheet. */
+function foodDetailLine(food) {
+  const items = (food && food.items) || [];
+  if (!items.length) {
+    const raw = (food && food.text) ? String(food.text).trim().replace(/\s+/g, " ") : "";
+    return raw;
+  }
+  const order = MEAL_IDS.concat([""]);
+  const parts = [];
+  order.forEach(id => {
+    const group = items.filter(it => normMeal(it.meal) === id);
+    if (!group.length) return;
+    const label = MEAL_LABEL[id] || "UNASSIGNED";
+    const listed = group.map(it => {
+      const bits = [String(it.name || "item").trim()];
+      const qty = String(it.qty == null ? "" : it.qty).trim();
+      if (qty && qty.toLowerCase() !== "manual") bits.push("(" + qty + ")");
+      bits.push(Math.round(num(it.kcal)) + " kcal");
+      return bits.join(" ");
+    }).join("; ");
+    parts.push(label.charAt(0) + label.slice(1).toLowerCase() + ": " + listed);
+  });
+  const note = (food && food.note) ? String(food.note).trim() : "";
+  if (note) parts.push("note: " + note);
+  return parts.join(" | ");
+}
 function buildAuditCsv(rollups, state, cutoff) {
   const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
-    "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Balance kcal",
+    "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Food detail", "Balance kcal",
     "Carbs g", "Protein g", "Fat g", "kcal target", "Protein tgt g", "Carb tgt g", "Protein met",
     "Act effort", "HI effort", "LO effort", "Followed plan", "Notes"];
   const metab = estimateMetabolism(rollups, state, cutoff);
@@ -3654,7 +3684,7 @@ function buildAuditCsv(rollups, state, cutoff) {
     const macro = (food.items || []).reduce((a, it) => ({ c: a.c + num(it.carbs), p: a.p + num(it.protein), f: a.f + num(it.fat) }), { c: 0, p: 0, f: 0 });
     const notes = (state.logs[d.d] && state.logs[d.d].notes) || "";
     const flag = (state.logs[d.d] && state.logs[d.d].adherence) || "";
-    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim()) || flag;
+    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim()) || flag || !!foodDetailLine(food);
     if (!anyData) return;
     const detail = sess.map(s => {
       const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
@@ -3664,6 +3694,7 @@ function buildAuditCsv(rollups, state, cutoff) {
       if (s.calc && s.calc.kcal) bits.push(s.calc.kcal + "kcal");
       return bits.join(" ");
     }).join(" | ");
+    const foodDetail = foodDetailLine(food);
     if (sess.length) { nTrain++; tMin += num(r.actMin); }
     if (num(r.intake) > 0) nFood++;
     tKcal += num(r.actKcal); tBurn += num(r.totalBurn); tIntake += num(r.intake);
@@ -3675,7 +3706,7 @@ function buildAuditCsv(rollups, state, cutoff) {
       d.d, WD[fromIso(d.d).getDay()], d.week, (PLAN.phases[d.ph] && PLAN.phases[d.ph].name) || d.ph || "",
       KIND_LABEL[d.k] || d.k || "", num(m.weight) > 40 ? _round(num(m.weight), 1) : "", m.rhr || "", m.sleep || "", m.energy || "",
       sess.length, detail, Math.round(num(r.actKcal)), Math.round(num(r.bmr)), Math.round(num(r.totalBurn)),
-      num(r.intake) > 0 ? Math.round(num(r.intake)) : "", r.balance != null ? Math.round(num(r.balance)) : "",
+      num(r.intake) > 0 ? Math.round(num(r.intake)) : "", foodDetail, r.balance != null ? Math.round(num(r.balance)) : "",
       macro.c ? _round(macro.c, 0) : "", macro.p ? _round(macro.p, 0) : "", macro.f ? _round(macro.f, 0) : "",
       t.kcal, t.protein_g, t.carbs_g, protMet,
       Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)),
@@ -3685,7 +3716,7 @@ function buildAuditCsv(rollups, state, cutoff) {
   });
   const totals = ["TOTALS / AVG", "", "", "", "", "", "", "", "",
     nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
-    nFood ? Math.round(tIntake) : "", nFood ? Math.round(tIntake - tBurn) : "",
+    nFood ? Math.round(tIntake) : "", nFood ? nFood + " days logged" : "", nFood ? Math.round(tIntake - tBurn) : "",
     "", "", "", "", "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), "", ""];
   const meta = "coach-data-audit  generated " + new Date().toISOString() + "  \u00b7 maintenance " + metab.restMaintenance + " kcal (" + metab.source + ")  \u00b7 calorie figures are estimates, \u00b115%";
   const lines = [];
