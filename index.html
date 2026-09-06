@@ -2829,6 +2829,7 @@ const RUN_MET_FROM_PACE = secPerKm => {
 const ACTIVITIES = {
   run: {
     label: "Run",
+    isRun: true,
     hi: true,
     metByRPE: [6.0, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5],
     defaultRPE: 5,
@@ -2837,7 +2838,12 @@ const ACTIVITIES = {
   tapis_roulant: {
     label: "Tapis roulant",
     treadmill: true,
-    wantsDist: false,
+    isRun: true,
+    /* Treadmill kilometres are running kilometres: on a bad-weather day they
+       have to count toward the plan's distance targets the same as road ones.
+       Distance is optional here because it can be derived from speed x time -
+       see sessionKm() - but the console figure is better if you have it. */
+    wantsDist: true,
     defaultRPE: 4
   },
   tennis_hi: {
@@ -2955,7 +2961,22 @@ function TREADMILL_MET(speedKmh, slopePct) {
   return Math.max(1, vo2 / 3.5);
 }
 
-/* score one session -> {kcal, effort, met, hi} */
+/* Is this session a run, whatever surface it happened on? */
+const isRunSession = type => !!(ACTIVITIES[type] && ACTIVITIES[type].isRun);
+
+/* Distance credited to a session, in km. A typed distance always wins. Failing
+   that, a treadmill session can be reconstructed from speed x duration, which
+   is what the console would have shown. Everything else has no distance unless
+   it was entered. */
+function sessionKm(sess) {
+  if (!sess) return 0;
+  const typed = num(sess.dist);
+  if (typed > 0) return typed;
+  if (sess.type === "tapis_roulant") return _round(num(sess.speed) * num(sess.dur) / 60, 2);
+  return 0;
+}
+
+/* score one session -> {kcal, effort, met, zone, km} */
 function scoreSession(sess, weightKg) {
   const spec = ACTIVITIES[sess.type] || ACTIVITIES.other;
   const dur = num(sess.dur);
@@ -2988,7 +3009,9 @@ function scoreSession(sess, weightKg) {
     effort: Math.round(effort),
     met: +met.toFixed(1),
     rpeUsed: effRpe,
-    zone
+    zone,
+    km: sessionKm(sess),
+    isRun: isRunSession(sess.type)
   };
 }
 
@@ -3477,7 +3500,7 @@ function buildProgressSummary(rollups, state, cutoff) {
         const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
         const key = spec.label || s.type;
         const b = byAct[key] || (byAct[key] = { sessions: 0, minutes: 0, kcal: 0, km: 0 });
-        b.sessions++; b.minutes += num(s.dur); b.km += num(s.dist);
+        b.sessions++; b.minutes += num(s.dur); b.km += num(s.calc && s.calc.km);
         b.kcal += num(s.calc && s.calc.kcal);
       });
     }
@@ -3804,7 +3827,7 @@ function buildAuditCsv(rollups, state, cutoff) {
       const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
       const bits = [spec.label || s.type];
       if (num(s.dur) > 0) bits.push(Math.round(num(s.dur)) + "min");
-      if (num(s.dist) > 0) bits.push(num(s.dist) + "km");
+      if (num(s.calc && s.calc.km) > 0) bits.push(_round(num(s.calc.km), 2) + "km");
       if (s.calc && s.calc.kcal) bits.push(s.calc.kcal + "kcal");
       return bits.join(" ");
     }).join(" | ");
@@ -4298,7 +4321,8 @@ function App() {
       }
       let ak = 0,
         ae = 0,
-        dur = 0;
+        dur = 0,
+        aKm = 0;
       const actEffZ = emptyZones(),
         actMinZ = emptyZones();
       const sessions = (l?.sessions || []).map(sess => {
@@ -4306,6 +4330,7 @@ function App() {
         ak += s.kcal;
         ae += s.effort;
         dur += num(sess.dur);
+        if (s.isRun) aKm += s.km;
         actEffZ[s.zone] += s.effort;
         actMinZ[s.zone] += num(sess.dur);
         return {
@@ -4328,6 +4353,7 @@ function App() {
         actEffZone: actEffZ,
         actMinZone: actMinZ,
         actMin: dur,
+        actKm: _round(aKm, 2),
         sessions,
         morning: l?.morning || {},
         food: l?.food || null,
@@ -5024,7 +5050,11 @@ function SessionRow({
   const spec = ACTIVITIES[sess.type];
   const isTread = sess.type === "tapis_roulant";
   const isStrength = sess.type === "strength";
-  const showDist = spec.wantsDist && !isTread;
+  const showDist = spec.wantsDist;
+  /* On the treadmill, distance is optional: if it is left blank the km are
+     reconstructed from speed x duration, so the box shows that figure as its
+     placeholder rather than an invented example. */
+  const treadKm = isTread ? _round(num(sess.speed) * num(sess.dur) / 60, 2) : 0;
   const [sText, setSText] = useState(sess.strength && sess.strength.text || "");
   const [sBusy, setSBusy] = useState(false);
   const [sErr, setSErr] = useState("");
@@ -5103,7 +5133,7 @@ function SessionRow({
       dist: v
     }),
     w: "w-24",
-    ph: "8"
+    ph: isTread ? (treadKm > 0 ? String(treadKm) : "auto") : "8"
   }), isTread && /*#__PURE__*/React.createElement(Field, {
     label: "Speed km/h",
     value: sess.speed,
@@ -5164,6 +5194,14 @@ function SessionRow({
         ? "No RPE logged, so this session cannot be placed in an intensity zone."
         : `RPE ${calc.rpeUsed} \u2192 ${ZONE_META[calc.zone].short}`
     }, ZONE_META[calc.zone].label, calc.zone === "unknown" ? "" : " INTENSITY"),
+      calc.km > 0 && /*#__PURE__*/React.createElement("span", {
+        className: "text-gray-500",
+        title: isTread && !(num(sess.dist) > 0)
+          ? "Derived from speed \u00d7 duration. Type the console distance to override it."
+          : null
+      }, "km ", /*#__PURE__*/React.createElement("b", {
+        className: "text-black"
+      }, _round(calc.km, 2)), isTread && !(num(sess.dist) > 0) ? " (from speed)" : ""),
       calc.zone === "unknown" && /*#__PURE__*/React.createElement("span", {
         className: "text-gray-500"
       }, "\u2190 add an RPE so this counts toward your easy/hard split"));
@@ -5715,7 +5753,7 @@ function WeekView({
     const r = rollups[d.d];
     return {
       pKm: a.pKm + d.km,
-      aKm: a.aKm + r.sessions.reduce((s, x) => s + (x.type === "run" ? num(x.dist) : 0), 0),
+      aKm: a.aKm + num(r.actKm),
       pEff: a.pEff + r.planEffort,
       aEff: a.aEff + r.actEffort,
       pKcal: a.pKcal + r.planKcal,
@@ -5848,7 +5886,7 @@ function WeekView({
         borderColor: "#D6DAD2",
         color: ACT_COLOR[s.type]
       }
-    }, ACTIVITIES[s.type].label, " ", num(s.dur) > 0 ? `${Math.round(num(s.dur))}'` : "", num(s.dist) > 0 ? ` · ${num(s.dist)}km` : ""))), /*#__PURE__*/React.createElement("div", {
+    }, ACTIVITIES[s.type].label, " ", num(s.dur) > 0 ? `${Math.round(num(s.dur))}'` : "", num(s.calc && s.calc.km) > 0 ? ` · ${_round(num(s.calc.km), 2)}km` : ""))), /*#__PURE__*/React.createElement("div", {
       className: "text-sm mt-1 leading-snug"
     }, txt)));
   })));
@@ -6306,9 +6344,11 @@ function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state
       intensity: (s.calc && s.calc.zone) || "unknown",
       rpeUsedForZone: s.calc && s.calc.rpeUsed
     };
-    if (num(s.dist) > 0) {
-      o.km = num(s.dist);
-      if (num(s.dur) > 0) o.pace_per_km = secToPace(num(s.dur) * 60 / num(s.dist));
+    const km = num(s.calc && s.calc.km);
+    if (km > 0) {
+      o.km = _round(km, 2);
+      if (num(s.dur) > 0) o.pace_per_km = secToPace(num(s.dur) * 60 / km);
+      if (s.type === "tapis_roulant" && !(num(s.dist) > 0)) o.kmSource = "derived from treadmill speed x duration";
     }
     if (s.notes && String(s.notes).trim()) o.sessionNote = String(s.notes).trim();
     return o;
@@ -8038,7 +8078,7 @@ function StatsTable({
     const p = perAct[s.type];
     p.count++;
     p.dur += num(s.dur);
-    p.dist += num(s.dist);
+    p.dist += num(s.calc && s.calc.km);
     p.eff += s.calc.effort;
     p.kcal += s.calc.kcal;
   }));
@@ -8311,7 +8351,6 @@ const LADDER_COLORS = {
   peak:    { fill: "#2E7D4F", label: "Peak long run" },
   race:    { fill: "#B3272D", label: "Race / event" }
 };
-const RUN_TYPES = { run: 1, tapis_roulant: 1 };
 
 function buildLongRunLadder(state, todayIso) {
   /* longest run logged in each week, from whatever is in the log */
@@ -8321,7 +8360,7 @@ function buildLongRunLadder(state, todayIso) {
     w.days.forEach(d => {
       const l = (state.logs || {})[d.d];
       ((l && l.sessions) || []).forEach(s => {
-        if (RUN_TYPES[s.type] && num(s.dist) > best) best = num(s.dist);
+        if (isRunSession(s.type) && sessionKm(s) > best) best = sessionKm(s);
       });
     });
     actualByWeek[w.n] = best;
