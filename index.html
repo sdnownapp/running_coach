@@ -2774,12 +2774,51 @@ const ALL_DAYS = PLAN.weeks.flatMap(w => w.days.map(d => ({
 })));
 const DAY_BY_ISO = Object.fromEntries(ALL_DAYS.map(d => [d.d, d]));
 
+/* ================= INTENSITY ZONES =================
+   Three buckets, decided by perceived effort and nothing else:
+     easy      RPE 1-4    conversational; the bulk of a polarised plan
+     moderate  RPE 5-6    the grey zone - worth watching, not worth living in
+     hard      RPE 7-10   quality, races, anything genuinely uncomfortable
+
+   Activity type sets a DEFAULT RPE when none was logged, but it must never
+   decide the zone. It used to: the old test was `hi = spec.hi || effRpe >= 7`,
+   and `run.hi === true` short-circuited it, so every run - including a recovery
+   jog at RPE 3 - was filed as high intensity. That reported this plan to the
+   coach as 67% hard when by time it is 83% easy / 3% moderate / 14% hard.
+
+   A session with no RPE is "unknown", not guessed: inventing grey-zone work the
+   athlete never did is worse than admitting the gap. */
+const ZONE_IDS = ["easy", "moderate", "hard", "unknown"];
+const ZONE_META = {
+  easy:     { label: "EASY",     short: "easy",     color: "#2E7D4F", bg: "#E9F3EC" },
+  moderate: { label: "MODERATE", short: "moderate", color: "#C08A1E", bg: "#FBF3E4" },
+  hard:     { label: "HARD",     short: "hard",     color: "#B3272D", bg: "#FAE9E7" },
+  unknown:  { label: "NO RPE",   short: "unrated",  color: "#6B7472", bg: "#F1F2EF" }
+};
+const zoneFromRPE = r => (r <= 4 ? "easy" : r <= 6 ? "moderate" : "hard");
+const emptyZones = () => ({ easy: 0, moderate: 0, hard: 0, unknown: 0 });
+const addZones = (into, from) => { ZONE_IDS.forEach(k => { into[k] += num(from && from[k]); }); return into; };
+const zoneTotal = z => ZONE_IDS.reduce((a, k) => a + num(z && z[k]), 0);
+/* Whole-percentage shares of a zone tally; null when there is nothing to divide. */
+const zoneShare = z => {
+  const t = zoneTotal(z);
+  if (!t) return null;
+  const p = {};
+  ZONE_IDS.forEach(k => { p[k] = Math.round(100 * num(z[k]) / t); });
+  return p;
+};
+/* Same shares, relabelled for the JSON handed to the model: "unrated" reads as
+   a data gap, whereas "unknown" invites it to be treated as a fourth zone. */
+const zoneShareForCoach = z => {
+  const p = zoneShare(z);
+  return p ? { easy: p.easy, moderate: p.moderate, hard: p.hard, unrated: p.unknown } : null;
+};
+
 /* ================= ACTIVITY CATALOGUE =================
    MET values from the Compendium of Physical Activities.
-   High-intensity (hi:true) or low-intensity (hi:false):
-     HI = the metabolic 'hard' work — running, sport bike, tennis when flagged hard,
-          hard swim. LO = walking, commuting, easy ski, social tennis, strength, other.
-   Any session with RPE >= 7 is also treated as HI regardless of activity. */
+   NOTE: the per-activity `hi` flag below is legacy and is no longer read by
+   anything. Intensity comes from RPE via zoneFromRPE(). Do not reintroduce it
+   as a classifier. */
 const RUN_MET_FROM_PACE = secPerKm => {
   if (!secPerKm) return 8.0;
   const kph = 3600 / secPerKm;
@@ -2938,12 +2977,18 @@ function scoreSession(sess, weightKg) {
   const hours = dur / 60;
   const kcal = met * wt * hours;
   const effort = met * hours * effRpe;
-  const hi = spec.hi || effRpe >= 7;
+  /* effRpe falls back to the activity default when nothing was logged. That is
+     fine for the effort index - a workload number still has to exist - but not
+     for the zone, so a zone is only assigned when the RPE is real, or derived
+     from measured speed and slope as on the treadmill. */
+  const rpeIsReal = num(sess.rpe) > 0 || sess.type === "tapis_roulant";
+  const zone = rpeIsReal ? zoneFromRPE(effRpe) : "unknown";
   return {
     kcal: Math.round(kcal),
     effort: Math.round(effort),
     met: +met.toFixed(1),
-    hi
+    rpeUsed: effRpe,
+    zone
   };
 }
 
@@ -3413,13 +3458,15 @@ function buildProgressSummary(rollups, state, cutoff) {
   }
 
   /* --- training load --- */
-  let planEff = 0, actEff = 0, hi = 0, lo = 0, actKcal = 0, mins = 0, trained = 0, planDays = 0;
+  let planEff = 0, actEff = 0, actKcal = 0, mins = 0, trained = 0, planDays = 0;
+  const actMinZ = emptyZones(), actEffZ = emptyZones(), planMinZ = emptyZones();
   let planDaysDone = 0, offPlanDays = 0;
   const byAct = {};
   days.forEach(d => {
     const r = R(d);
     planEff += num(r.planEffort); actEff += num(r.actEffort);
-    hi += num(r.actHi); lo += num(r.actLo); actKcal += num(r.actKcal); mins += num(r.actMin);
+    addZones(actMinZ, r.actMinZone); addZones(actEffZ, r.actEffZone); addZones(planMinZ, r.planMinZone);
+    actKcal += num(r.actKcal); mins += num(r.actMin);
     const askedFor = planWantsSession(d);
     const didTrain = !!(r.sessions && r.sessions.length);
     if (askedFor) { planDays++; if (didTrain) planDaysDone++; }
@@ -3450,8 +3497,19 @@ function buildProgressSummary(rollups, state, cutoff) {
     actualEffort: Math.round(actEff),
     plannedEffortToDate: Math.round(planEff),
     effortVsPlanPct: planEff > 0 ? Math.round(100 * actEff / planEff) : null,
-    hiEffort: Math.round(hi), loEffort: Math.round(lo),
-    hiToLoRatio: lo > 0 ? _round(hi / lo, 2) : null,
+    intensityDistribution: {
+      basis: "minutes of logged training, bucketed by the session's own RPE (easy 1-4, moderate 5-6, hard 7-10)",
+      easyMin: Math.round(actMinZ.easy), moderateMin: Math.round(actMinZ.moderate),
+      hardMin: Math.round(actMinZ.hard), unratedMin: Math.round(actMinZ.unknown),
+      sharePct: zoneShareForCoach(actMinZ),
+      plannedSharePct: zoneShareForCoach(planMinZ),
+      note: "unrated = logged with no RPE, so it could not be classified; it is excluded from nothing and should be read as a data gap"
+    },
+    effortByIntensity: {
+      basis: "the same split measured in effort index rather than minutes; hard work scores higher per minute here, so this share always exceeds the minutes share",
+      easy: Math.round(actEffZ.easy), moderate: Math.round(actEffZ.moderate),
+      hard: Math.round(actEffZ.hard), unrated: Math.round(actEffZ.unknown)
+    },
     sessionKcal: Math.round(actKcal),
     byActivity: byAct
   };
@@ -3549,7 +3607,7 @@ async function analyseProgress(summary, prevReports) {
     : "";
   const prompt = `You are a two-person team advising one athlete: a Senior Training Coach / sports physiologist and a Senior Sports Nutritionist, each with 25 years' experience with endurance athletes. Speak with one unified voice. The athlete is preparing for a 12K (4 Apr 2027) and a half marathon (9 May 2027).
 
-Below is a JSON snapshot of everything they have logged so far — training load, energy balance, macros, weight trend, recovery markers, race results, recent momentum, an estimate of their real maintenance metabolism, and how well they are hitting their periodized fuelling targets. Effort is a unitless internal index (MET × hours × RPE). "compliancePct" is the share of the days the plan actually asked for a session (rest and travel days excluded) that got one; "daysTrainedOffPlan" counts sessions done on rest or travel days, which sit outside that figure. "Balance" is intake minus total burn (BMR + sessions): negative = deficit. The "metabolism" block gives restMaintenanceKcal (non-exercise maintenance; source "scale" means reverse-engineered from their weight trend, "bmr" means a formula prior until there's enough data). The "fuelling" block scores adherence to a protein floor (proteinTarget_gPerKg) and to a training-day-aware calorie target, and whether carbs are periodized (higher on hard days than rest days). Calorie figures are estimates (±15%).
+Below is a JSON snapshot of everything they have logged so far — training load, energy balance, macros, weight trend, recovery markers, race results, recent momentum, an estimate of their real maintenance metabolism, and how well they are hitting their periodized fuelling targets. Effort is a unitless internal index (MET × hours × RPE). "compliancePct" is the share of the days the plan actually asked for a session (rest and travel days excluded) that got one; "daysTrainedOffPlan" counts sessions done on rest or travel days, which sit outside that figure. Judge intensity distribution from "intensityDistribution", which is in MINUTES and bucketed by each session's own RPE - not from the effort index, and never from the activity name. Compare sharePct against plannedSharePct. A polarised endurance plan wants roughly 80% easy with the moderate bucket kept small; moderate creeping up is easy days being run too hard, which is the failure mode worth naming early. If unratedMin is a large share, say so and ask for RPE rather than drawing conclusions. "Balance" is intake minus total burn (BMR + sessions): negative = deficit. The "metabolism" block gives restMaintenanceKcal (non-exercise maintenance; source "scale" means reverse-engineered from their weight trend, "bmr" means a formula prior until there's enough data). The "fuelling" block scores adherence to a protein floor (proteinTarget_gPerKg) and to a training-day-aware calorie target, and whether carbs are periodized (higher on hard days than rest days). Calorie figures are estimates (±15%).
 
 Write the athlete a coaching report in plain, natural language — the way you would actually talk to them. Cover, weaving them together rather than as a checklist:
 1. Headline: are they progressing, holding, or slipping — and on what evidence.
@@ -3598,7 +3656,8 @@ ${JSON.stringify(summary)}`;
 function buildWeekSummary(rollups, state, week, metab) {
   const prof = state.profile, fuel = normFuel(state.fuel);
   const dayRows = week.days.map(d => rollups[d.d]).filter(Boolean);
-  let trained = 0, planned = 0, effort = 0, planEffort = 0, hi = 0, lo = 0, sessKcal = 0, mins = 0;
+  let trained = 0, planned = 0, effort = 0, planEffort = 0, sessKcal = 0, mins = 0;
+  const wMinZ = emptyZones(), wPlanMinZ = emptyZones();
   let plannedDone = 0, offPlan = 0;
   let intakeSum = 0, burnSum = 0, foodDays = 0, protMet = 0, protAny = 0, protKgSum = 0;
   const ws = [];
@@ -3616,7 +3675,8 @@ function buildWeekSummary(rollups, state, week, metab) {
       r.sessions.forEach(s => { const spec = ACTIVITIES[s.type] || ACTIVITIES.other; actTally[spec.label || s.type] = (actTally[spec.label || s.type] || 0) + 1; });
     }
     effort += num(r.actEffort); planEffort += num(r.planEffort);
-    hi += num(r.actHi); lo += num(r.actLo); sessKcal += num(r.actKcal); mins += num(r.actMin);
+    addZones(wMinZ, r.actMinZone); addZones(wPlanMinZ, r.planMinZone);
+    sessKcal += num(r.actKcal); mins += num(r.actMin);
     if (num(r.intake) > 0) {
       foodDays++; intakeSum += num(r.intake); burnSum += num(r.totalBurn);
       const lm = loggedMacros(r);
@@ -3634,7 +3694,12 @@ function buildWeekSummary(rollups, state, week, metab) {
     plannedDaysCompleted: plannedDone, daysTrainedOffPlan: offPlan,
     compliancePct: planned ? Math.round(100 * plannedDone / planned) : null,
     minutes: Math.round(mins), effort: Math.round(effort), plannedEffort: Math.round(planEffort),
-    hiEffort: Math.round(hi), loEffort: Math.round(lo), sessionKcal: Math.round(sessKcal),
+    intensityMinutes: {
+      easy: Math.round(wMinZ.easy), moderate: Math.round(wMinZ.moderate),
+      hard: Math.round(wMinZ.hard), unrated: Math.round(wMinZ.unknown),
+      sharePct: zoneShareForCoach(wMinZ), plannedSharePct: zoneShareForCoach(wPlanMinZ)
+    },
+    sessionKcal: Math.round(sessKcal),
     topActivity: topAct,
     foodLoggedDays: foodDays,
     avgIntakeKcal: foodDays ? Math.round(intakeSum / foodDays) : null,
@@ -3652,7 +3717,7 @@ async function analyseWeek(weekSum, prev) {
   const __model = coachModel();
   const prompt = `You are a Senior Endurance Coach and a Senior Sports Nutritionist writing a SHORT Monday digest to an athlete building toward a 12K (4 Apr 2027) and half marathon (9 May 2027). One unified voice.
 
-Here is last week's snapshot as JSON${prev ? ", plus the week before for comparison" : ""}. Effort is MET×hours×RPE. avgBalanceKcal negative = calorie deficit. proteinMetPct = share of food-logged days hitting the protein floor. compliancePct = share of the days the plan asked for a session (rest and travel days excluded) that got one; daysTrainedOffPlan = extra sessions done on rest days.
+Here is last week's snapshot as JSON${prev ? ", plus the week before for comparison" : ""}. Effort is MET×hours×RPE. avgBalanceKcal negative = calorie deficit. proteinMetPct = share of food-logged days hitting the protein floor. compliancePct = share of the days the plan asked for a session (rest and travel days excluded) that got one; daysTrainedOffPlan = extra sessions done on rest days. intensityMinutes splits the week's training MINUTES by each session's own RPE (easy 1-4, moderate 5-6, hard 7-10); compare sharePct with plannedSharePct, and treat a growing moderate share as easy runs drifting too hard. unrated = logged without an RPE, a data gap rather than a zone.
 
 Write 60–110 words, warm but candid: one line on how the week went (training + weight/fuelling together), one concrete win, one thing to fix next week. No headers, no bullet lists, no markdown tables. Start with a 3–6 word bold **lead-in** then a colon, then the digest. Use their real numbers. Do not invent data; if a whole area is blank, say what to log.
 
@@ -3716,12 +3781,13 @@ function buildAuditCsv(rollups, state, cutoff) {
   const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
     "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Food detail", "Balance kcal",
     "Carbs g", "Protein g", "Fat g", "kcal target", "Protein tgt g", "Carb tgt g", "Protein met",
-    "Act effort", "HI effort", "LO effort", "Followed plan", "Notes"];
+    "Act effort", "Easy min", "Moderate min", "Hard min", "Unrated min", "Followed plan", "Notes"];
   const metab = estimateMetabolism(rollups, state, cutoff);
   const prof = state.profile, fuelCfg = normFuel(state.fuel);
   let auditW = metab.weightKg;
   const rows = [];
-  let tKcal = 0, tBurn = 0, tIntake = 0, tEff = 0, tHi = 0, tLo = 0, tMin = 0, nTrain = 0, nFood = 0;
+  let tKcal = 0, tBurn = 0, tIntake = 0, tEff = 0, tMin = 0, nTrain = 0, nFood = 0;
+  const tMinZ = emptyZones();
   ALL_DAYS.forEach(d => {
     if (d.d > cutoff) return;
     const r = rollups[d.d]; if (!r) return;
@@ -3746,7 +3812,7 @@ function buildAuditCsv(rollups, state, cutoff) {
     if (sess.length) { nTrain++; tMin += num(r.actMin); }
     if (num(r.intake) > 0) nFood++;
     tKcal += num(r.actKcal); tBurn += num(r.totalBurn); tIntake += num(r.intake);
-    tEff += num(r.actEffort); tHi += num(r.actHi); tLo += num(r.actLo);
+    tEff += num(r.actEffort); addZones(tMinZ, r.actMinZone);
     const sessRef = num(r.actKcal) > 0 ? num(r.actKcal) : num(r.planKcal);
     const t = fuelTargets(d.k, auditW, prof, fuelCfg, metab.restMaintenance, sessRef, d.d);
     const protMet = num(r.intake) > 0 ? (macro.p >= 0.9 * t.protein_g ? "yes" : "no") : "";
@@ -3757,7 +3823,9 @@ function buildAuditCsv(rollups, state, cutoff) {
       num(r.intake) > 0 ? Math.round(num(r.intake)) : "", foodDetail, r.balance != null ? Math.round(num(r.balance)) : "",
       macro.c ? _round(macro.c, 0) : "", macro.p ? _round(macro.p, 0) : "", macro.f ? _round(macro.f, 0) : "",
       t.kcal, t.protein_g, t.carbs_g, protMet,
-      Math.round(num(r.actEffort)), Math.round(num(r.actHi)), Math.round(num(r.actLo)),
+      Math.round(num(r.actEffort)),
+      Math.round(num(r.actMinZone && r.actMinZone.easy)), Math.round(num(r.actMinZone && r.actMinZone.moderate)),
+      Math.round(num(r.actMinZone && r.actMinZone.hard)), Math.round(num(r.actMinZone && r.actMinZone.unknown)),
       (flag && ADHERENCE[flag]) ? ADHERENCE[flag].label : "",
       notes
     ]);
@@ -3765,7 +3833,8 @@ function buildAuditCsv(rollups, state, cutoff) {
   const totals = ["TOTALS / AVG", "", "", "", "", "", "", "", "",
     nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
     nFood ? Math.round(tIntake) : "", nFood ? nFood + " days logged" : "", nFood ? Math.round(tIntake - tBurn) : "",
-    "", "", "", "", "", "", "", Math.round(tEff), Math.round(tHi), Math.round(tLo), "", ""];
+    "", "", "", "", "", "", "", Math.round(tEff),
+    Math.round(tMinZ.easy), Math.round(tMinZ.moderate), Math.round(tMinZ.hard), Math.round(tMinZ.unknown), "", ""];
   const meta = "coach-data-audit  generated " + new Date().toISOString() + "  \u00b7 maintenance " + metab.restMaintenance + " kcal (" + metab.source + ")  \u00b7 calorie figures are estimates, \u00b115%";
   const lines = [];
   lines.push(csvCell(meta));
@@ -4211,28 +4280,34 @@ function App() {
     for (const d of ALL_DAYS) {
       const l = state.logs[d.d];
       if (num(l?.morning?.weight) > 40) recentW = num(l.morning.weight);
+      /* Effort AND minutes are tallied per zone. Minutes are the coaching unit
+         for intensity distribution - the effort index multiplies intensity in
+         twice (MET x hours x RPE), so measuring the split in effort inflates
+         the hard share. Both are kept; they answer different questions. */
       let pk = 0,
-        pe = 0,
-        pHi = 0,
-        pLo = 0;
+        pe = 0;
+      const planEffZ = emptyZones(),
+        planMinZ = emptyZones();
       const ps = plannedSession(d);
       if (ps) {
         const s = scoreSession(ps, recentW);
         pk = s.kcal;
         pe = s.effort;
-        if (s.hi) pHi = s.effort;else pLo = s.effort;
+        planEffZ[s.zone] += s.effort;
+        planMinZ[s.zone] += num(ps.dur);
       }
       let ak = 0,
         ae = 0,
-        aHi = 0,
-        aLo = 0,
         dur = 0;
+      const actEffZ = emptyZones(),
+        actMinZ = emptyZones();
       const sessions = (l?.sessions || []).map(sess => {
         const s = scoreSession(sess, recentW);
         ak += s.kcal;
         ae += s.effort;
         dur += num(sess.dur);
-        if (s.hi) aHi += s.effort;else aLo += s.effort;
+        actEffZ[s.zone] += s.effort;
+        actMinZ[s.zone] += num(sess.dur);
         return {
           ...sess,
           calc: s
@@ -4246,12 +4321,12 @@ function App() {
         week: d.week,
         planKcal: pk,
         planEffort: pe,
-        planHi: pHi,
-        planLo: pLo,
+        planEffZone: planEffZ,
+        planMinZone: planMinZ,
         actKcal: ak,
         actEffort: ae,
-        actHi: aHi,
-        actLo: aLo,
+        actEffZone: actEffZ,
+        actMinZone: actMinZ,
         actMin: dur,
         sessions,
         morning: l?.morning || {},
@@ -5083,9 +5158,15 @@ function SessionRow({
       className: "px-1.5 py-0.5 rounded text-white font-semibold",
       style: {
         fontSize: 10,
-        background: calc.hi ? "#B3272D" : "#5F7A5F"
-      }
-    }, calc.hi ? "HIGH" : "LOW", " INTENSITY"));
+        background: ZONE_META[calc.zone].color
+      },
+      title: calc.zone === "unknown"
+        ? "No RPE logged, so this session cannot be placed in an intensity zone."
+        : `RPE ${calc.rpeUsed} \u2192 ${ZONE_META[calc.zone].short}`
+    }, ZONE_META[calc.zone].label, calc.zone === "unknown" ? "" : " INTENSITY"),
+      calc.zone === "unknown" && /*#__PURE__*/React.createElement("span", {
+        className: "text-gray-500"
+      }, "\u2190 add an RPE so this counts toward your easy/hard split"));
   })(), isStrength && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 pt-3 border-t",
     style: {
@@ -5639,10 +5720,8 @@ function WeekView({
       aEff: a.aEff + r.actEffort,
       pKcal: a.pKcal + r.planKcal,
       aKcal: a.aKcal + r.actKcal,
-      aHi: a.aHi + r.actHi,
-      aLo: a.aLo + r.actLo,
-      pHi: a.pHi + r.planHi,
-      pLo: a.pLo + r.planLo,
+      aMinZ: addZones(a.aMinZ, r.actMinZone),
+      pMinZ: addZones(a.pMinZ, r.planMinZone),
       aMin: a.aMin + r.actMin
     };
   }, {
@@ -5652,10 +5731,8 @@ function WeekView({
     aEff: 0,
     pKcal: 0,
     aKcal: 0,
-    aHi: 0,
-    aLo: 0,
-    pHi: 0,
-    pLo: 0,
+    aMinZ: emptyZones(),
+    pMinZ: emptyZones(),
     aMin: 0
   });
   const pct = (a, p) => p > 0 ? Math.round(100 * a / p) : 0;
@@ -5703,15 +5780,17 @@ function WeekView({
     value: totals.aKm.toFixed(1),
     sub: `plan ${totals.pKm.toFixed(0)} km`
   }), /*#__PURE__*/React.createElement(KPI, {
-    label: "HI effort",
-    value: totals.aHi,
-    sub: `plan ${totals.pHi}`,
-    color: "#B3272D"
+    label: "Easy min",
+    value: Math.round(totals.aMinZ.easy),
+    sub: `plan ${Math.round(totals.pMinZ.easy)} \u00b7 moderate ${Math.round(totals.aMinZ.moderate)}`,
+    color: "#2E7D4F"
   }), /*#__PURE__*/React.createElement(KPI, {
-    label: "LO effort",
-    value: totals.aLo,
-    sub: `plan ${totals.pLo}`,
-    color: "#5F7A5F"
+    label: "Hard min",
+    value: Math.round(totals.aMinZ.hard),
+    sub: totals.aMinZ.unknown > 0
+      ? `plan ${Math.round(totals.pMinZ.hard)} \u00b7 ${Math.round(totals.aMinZ.unknown)} unrated`
+      : `plan ${Math.round(totals.pMinZ.hard)}`,
+    color: "#B3272D"
   })), /*#__PURE__*/React.createElement("div", {
     className: "divide-y",
     style: {
@@ -5788,8 +5867,10 @@ function SeasonView({
       aEff: r.reduce((a, x) => a + x.actEffort, 0),
       pKcal: r.reduce((a, x) => a + x.planKcal, 0),
       aKcal: r.reduce((a, x) => a + x.actKcal, 0),
-      aHi: r.reduce((a, x) => a + x.actHi, 0),
-      aLo: r.reduce((a, x) => a + x.actLo, 0),
+      aEasy: r.reduce((a, x) => a + num(x.actMinZone && x.actMinZone.easy), 0),
+      aMod: r.reduce((a, x) => a + num(x.actMinZone && x.actMinZone.moderate), 0),
+      aHard: r.reduce((a, x) => a + num(x.actMinZone && x.actMinZone.hard), 0),
+      aUnrated: r.reduce((a, x) => a + num(x.actMinZone && x.actMinZone.unknown), 0),
       sleep: (() => {
         const s = r.map(x => num(x.morning.sleep)).filter(v => v > 0);
         return s.length ? +(s.reduce((a, b) => a + b, 0) / s.length).toFixed(1) : null;
@@ -5925,7 +6006,7 @@ function SeasonView({
     name: "actual"
   }))))), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
-  }, /*#__PURE__*/React.createElement(Eyebrow, null, "ACTUAL EFFORT \xB7 HIGH VS LOW INTENSITY"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Eyebrow, null, "TRAINING MINUTES \xB7 BY INTENSITY ZONE"), /*#__PURE__*/React.createElement("div", {
     className: "h-56 mt-3"
   }, /*#__PURE__*/React.createElement(ResponsiveContainer, {
     width: "100%",
@@ -5952,18 +6033,28 @@ function SeasonView({
       fontSize: 11
     }
   }), /*#__PURE__*/React.createElement(Bar, {
-    dataKey: "aHi",
+    dataKey: "aEasy",
+    stackId: "a",
+    fill: "#2E7D4F",
+    name: "easy"
+  }), /*#__PURE__*/React.createElement(Bar, {
+    dataKey: "aMod",
+    stackId: "a",
+    fill: "#C08A1E",
+    name: "moderate"
+  }), /*#__PURE__*/React.createElement(Bar, {
+    dataKey: "aHard",
     stackId: "a",
     fill: "#B3272D",
-    name: "HI"
+    name: "hard"
   }), /*#__PURE__*/React.createElement(Bar, {
-    dataKey: "aLo",
+    dataKey: "aUnrated",
     stackId: "a",
-    fill: "#5F7A5F",
-    name: "LO"
+    fill: "#C9CCC5",
+    name: "no RPE"
   })))), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 mt-2"
-  }, "HI = run quality/race/long, sport bike, hard tennis, or any session flagged RPE \u2265 7. Target: LO \u2265 4\xD7 HI (the 80/20 rule).")), /*#__PURE__*/React.createElement(Card, {
+  }, "Minutes, split by each session's own RPE: easy 1-4, moderate 5-6, hard 7-10. Target for a polarised plan is roughly 80% easy with the moderate band kept thin \u2014 a growing amber block means easy runs are being run too hard. Grey = logged without an RPE, so it could not be classified.")), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "SLEEP \u2014 WEEKLY AVERAGE HOURS"), /*#__PURE__*/React.createElement("div", {
     className: "h-56 mt-3"
@@ -6212,7 +6303,8 @@ function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state
       rpe: num(s.rpe) || null,
       kcal: Math.round(num(s.calc && s.calc.kcal)),
       effortIndex: Math.round(num(s.calc && s.calc.effort)),
-      intensity: (s.calc && s.calc.hi) ? "high" : "low"
+      intensity: (s.calc && s.calc.zone) || "unknown",
+      rpeUsedForZone: s.calc && s.calc.rpeUsed
     };
     if (num(s.dist) > 0) {
       o.km = num(s.dist);
@@ -6265,8 +6357,12 @@ function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state
       sessionCount: sessions.length,
       minutes: Math.round(num(dayR.actMin)),
       effortIndex: Math.round(num(dayR.actEffort)),
-      highIntensityEffort: Math.round(num(dayR.actHi)),
-      lowIntensityEffort: Math.round(num(dayR.actLo)),
+      intensityMinutes: {
+        easy: Math.round(num(dayR.actMinZone && dayR.actMinZone.easy)),
+        moderate: Math.round(num(dayR.actMinZone && dayR.actMinZone.moderate)),
+        hard: Math.round(num(dayR.actMinZone && dayR.actMinZone.hard)),
+        unrated: Math.round(num(dayR.actMinZone && dayR.actMinZone.unknown))
+      },
       sessionKcal: Math.round(num(dayR.actKcal))
     },
     fuelling: num(dayR.intake) > 0 ? {
@@ -6675,11 +6771,9 @@ function ProgressView({
   let cP = 0,
     cA = 0,
     cPK = 0,
-    cAK = 0,
-    cPH = 0,
-    cAH = 0,
-    cPL = 0,
-    cAL = 0;
+    cAK = 0;
+  const cActMinZ = emptyZones(),
+    cPlanMinZ = emptyZones();
   let cIntake = 0,
     cBurnOnFoodDays = 0; // both accrue ONLY on days where food was logged, for like-for-like comparison
   let daysWithFood = 0,
@@ -6692,13 +6786,12 @@ function ProgressView({
     const r = rollups[d.d];
     cP += r.planEffort;
     cPK += r.planKcal;
-    cPH += r.planHi;
-    cPL += r.planLo;
+
     if (d.d <= cutoff) {
       cA += r.actEffort;
       cAK += r.actKcal;
-      cAH += r.actHi;
-      cAL += r.actLo;
+      addZones(cActMinZ, r.actMinZone);
+      addZones(cPlanMinZ, r.planMinZone);
       if (r.intake > 0) {
         cIntake += r.intake;
         cBurnOnFoodDays += r.totalBurn;
@@ -6722,16 +6815,12 @@ function ProgressView({
     });
   });
   let pEff = 0,
-    pKcal = 0,
-    pHi = 0,
-    pLo = 0;
+    pKcal = 0;
   ALL_DAYS.forEach(d => {
     if (d.d <= cutoff) {
       const r = rollups[d.d];
       pEff += r.planEffort;
       pKcal += r.planKcal;
-      pHi += r.planHi;
-      pLo += r.planLo;
     }
   });
   const weeklyCum = PLAN.weeks.map(w => {
@@ -6780,7 +6869,10 @@ function ProgressView({
   const eff_pct = pct(cA, pEff);
   const kcal_pct = pct(cAK, pKcal);
   const compliance = pct(daysWithActual, totalDaysWithPlan);
-  const hilo = cAL > 0 ? cAH / cAL : null;
+  /* Intensity distribution, in minutes and by the session's own RPE. */
+  const zMin = cActMinZ, zPlan = cPlanMinZ;
+  const zShare = zoneShare(zMin), zPlanShare = zoneShare(zPlan);
+  const easyPct = zShare ? zShare.easy : null;
   const avgBalance = daysWithFood ? Math.round(sumBalance / daysWithFood) : null;
   return /*#__PURE__*/React.createElement("div", {
     className: "space-y-4"
@@ -6819,15 +6911,17 @@ function ProgressView({
     sub: `plan-to-date ${pKcal.toLocaleString()} · ${kcal_pct}%`,
     color: "#B35F1E"
   }), /*#__PURE__*/React.createElement(KPI, {
-    label: "HI effort",
-    value: cAH.toLocaleString(),
-    sub: `plan-to-date ${pHi.toLocaleString()}`,
-    color: "#B3272D"
+    label: "Easy share",
+    value: easyPct != null ? easyPct + "%" : "\u2014",
+    sub: zPlanShare ? `of training minutes \u00b7 plan ${zPlanShare.easy}%` : "of training minutes",
+    color: easyPct == null ? "#1C2321" : easyPct >= 75 ? "#2E7D4F" : "#B3272D"
   }), /*#__PURE__*/React.createElement(KPI, {
-    label: "LO effort",
-    value: cAL.toLocaleString(),
-    sub: `plan-to-date ${pLo.toLocaleString()}${hilo != null ? ` · HI/LO ${hilo.toFixed(2)}` : ""}`,
-    color: "#5F7A5F"
+    label: "Moderate share",
+    value: zShare ? zShare.moderate + "%" : "\u2014",
+    sub: zShare && zMin.unknown > 0
+      ? `grey zone \u00b7 ${Math.round(zMin.unknown)} min unrated`
+      : "grey zone \u2014 keep it thin",
+    color: !zShare ? "#1C2321" : zShare.moderate <= 10 ? "#2E7D4F" : "#C08A1E"
   }))), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "CUMULATIVE EFFORT ACROSS THE SEASON"), /*#__PURE__*/React.createElement("div", {
@@ -7923,15 +8017,13 @@ function StatsTable({
     return {
       eff: a.eff + r.actEffort,
       kcal: a.kcal + r.actKcal,
-      hi: a.hi + r.actHi,
-      lo: a.lo + r.actLo,
+      minZ: addZones(a.minZ, r.actMinZone),
       min: a.min + r.actMin
     };
   }, {
     eff: 0,
     kcal: 0,
-    hi: 0,
-    lo: 0,
+    minZ: emptyZones(),
     min: 0
   });
   const perAct = {};
@@ -7979,8 +8071,11 @@ function StatsTable({
     l: "Weight change",
     v: firstW && lastW ? `${(lastW - firstW).toFixed(1)} kg (${firstW} → ${lastW})` : "—"
   }), /*#__PURE__*/React.createElement(Row, {
-    l: "HI / LO ratio",
-    v: totals.lo > 0 ? (totals.hi / totals.lo).toFixed(2) : "—"
+    l: "Easy / moderate / hard",
+    v: (() => {
+      const sh = zoneShare(totals.minZ);
+      return sh ? `${sh.easy}% / ${sh.moderate}% / ${sh.hard}%` + (sh.unknown ? ` (${sh.unknown}% unrated)` : "") : "\u2014";
+    })()
   }), /*#__PURE__*/React.createElement(Row, {
     l: "Total kcal",
     v: totals.kcal.toLocaleString()
