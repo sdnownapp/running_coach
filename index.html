@@ -6486,8 +6486,16 @@ function DayCoachCard({ activeIso, day, week, log, dayR, ready, engine, state, r
 
   return h(Card, { className: "p-5" },
     h(Eyebrow, null, "DAY NOTES"),
-    !isFutureDay && h("div", { className: "mt-3" },
+    /* The question is always asked, so the card keeps its shape as you move
+       between days. On a day that hasn't happened yet there is nothing to
+       answer, so the chips are replaced by a line saying why rather than
+       vanishing silently - which just looked like the button was missing. */
+    h("div", { className: "mt-3" },
       h("div", { className: "text-xs uppercase tracking-wide text-gray-500", style: mono }, "Did you do the planned session?"),
+      isFutureDay && h("div", { className: "text-sm text-gray-500 mt-2" },
+        "This day hasn't happened yet \u2014 you'll be able to record it from ",
+        fmtDate(activeIso), " onwards."),
+      !isFutureDay && h(React.Fragment, null,
       h("div", { className: "flex flex-wrap gap-2 mt-2" },
         ADHERENCE_ORDER.map(k => {
           const a = ADHERENCE[k], on = adh === k;
@@ -6502,7 +6510,7 @@ function DayCoachCard({ activeIso, day, week, log, dayR, ready, engine, state, r
             }
           }, a.short);
         })),
-      adh && h("div", { className: "text-xs text-gray-500 mt-1.5" }, "Tap again to clear.")),
+      adh && h("div", { className: "text-xs text-gray-500 mt-1" }, "Tap again to clear."))),
     h("textarea", {
       value: notes,
       onChange: e => patchDay(activeIso, { notes: e.target.value }),
