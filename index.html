@@ -3077,6 +3077,196 @@ function planWantsSession(day) {
   return !!plannedSession(day);
 }
 
+
+/* ================= INJURY =================
+   A day can be flagged as injured: where it hurts, which side, how much (pain
+   0-10), and which KINDS of training it rules out (e.g. a calf strain rules out
+   running but not cycling or strength). The flag lives on the day log as
+   log.injury and is read by the Today plan banner, the Week view and every
+   coach prompt (day note, weekly digest, progress analysis), so a run skipped
+   because of an injury is treated as injury management - not as a missed
+   session - and cross-training within the limits gets credit. */
+const INJURY_PARTS = [["foot", "Foot"], ["ankle", "Ankle"], ["achilles", "Achilles"], ["calf", "Calf"], ["shin", "Shin"], ["knee", "Knee"], ["it_band", "IT band"], ["hamstring", "Hamstring"], ["quad", "Quad"], ["hip", "Hip / groin"], ["glute", "Glute"], ["lower_back", "Lower back"], ["upper_back", "Upper back / neck"], ["shoulder", "Shoulder"], ["elbow", "Elbow"], ["wrist", "Wrist / hand"], ["other", "Other"]];
+const INJURY_PART_LABEL = Object.fromEntries(INJURY_PARTS);
+const INJURY_SIDES = [["L", "Left"], ["R", "Right"], ["both", "Both"]];
+const INJURY_SIDE_LABEL = Object.fromEntries(INJURY_SIDES);
+const ACT_GROUPS = {
+  run: { label: "Running", short: "RUN", types: ["run", "tapis_roulant"] },
+  cycle: { label: "Cycling", short: "BIKE", types: ["bike_sport", "bike_commute"] },
+  strength: { label: "Strength", short: "STRENGTH", types: ["strength"] },
+  tennis: { label: "Tennis", short: "TENNIS", types: ["tennis_hi", "tennis_lo"] },
+  walk: { label: "Walking / hiking", short: "WALK / HIKE", types: ["walk", "hiking", "rest_walk"] },
+  swim: { label: "Swimming", short: "SWIM", types: ["swim"] },
+  ski: { label: "Skiing", short: "SKI", types: ["ski", "ski_touring"] }
+};
+const ACT_GROUP_ORDER = Object.keys(ACT_GROUPS);
+const groupOfType = type => {
+  for (const g of ACT_GROUP_ORDER) if (ACT_GROUPS[g].types.indexOf(type) !== -1) return g;
+  return "other";
+};
+const groupLabel = g => ACT_GROUPS[g] ? ACT_GROUPS[g].label : "Other";
+const INJ_TONE = { color: "#B3272D", bg: "#FAE9E7", border: "#E5B3AF" };
+
+/* Clean whatever is stored into a predictable shape (or null = not injured). */
+function normInjury(x) {
+  if (!x || typeof x !== "object") return null;
+  const parts = Array.isArray(x.parts) ? x.parts.filter(p => INJURY_PART_LABEL[p]) : [];
+  const blocks = Array.isArray(x.blocks) ? x.blocks.filter(b => ACT_GROUPS[b]) : [];
+  const pain = Math.round(num(x.pain));
+  return {
+    parts,
+    blocks,
+    side: INJURY_SIDE_LABEL[x.side] ? x.side : "",
+    pain: pain >= 1 && pain <= 10 ? pain : null,
+    note: x.note ? String(x.note) : ""
+  };
+}
+const injuryOn = (state, iso) => normInjury(state && state.logs && state.logs[iso] && state.logs[iso].injury);
+
+/* "left calf, shin" / "knee (both sides)" / "unspecified area" */
+function injuryWhere(inj) {
+  if (!inj) return "";
+  const where = inj.parts.length ? inj.parts.map(p => INJURY_PART_LABEL[p].toLowerCase()).join(", ") : "unspecified area";
+  if (inj.side === "both") return where + " (both sides)";
+  return inj.side ? INJURY_SIDE_LABEL[inj.side].toLowerCase() + " " + where : where;
+}
+const capFirst = t => t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+
+/* Which activity groups the plan asks for on a day. The first entry is the
+   day's KEY session (the one the day is built around). */
+function plannedGroups(day) {
+  const ps = plannedSession(day);
+  if (!ps) return [];
+  const k = day.k;
+  const main = (k === "easy" || k === "quality" || k === "long" || k === "race") ? "run"
+    : k === "strength" ? "strength" : k === "ski" ? "ski" : groupOfType(ps.type);
+  const g = [main];
+  const add = x => { if (g.indexOf(x) === -1) g.push(x); };
+  const p = String(day.p || "").toUpperCase();
+  if (/\bRUN/.test(p)) add("run");
+  if (/STRENGTH/.test(p)) add("strength");
+  if (/TENNIS/.test(p)) add("tennis");
+  if (/\bBIKE|CYCL/.test(p)) add("cycle");
+  if (/\bSWIM/.test(p)) add("swim");
+  if (/\bSKI/.test(p)) add("ski");
+  return g;
+}
+
+/* How an injury interacts with one day's plan and what was actually logged. */
+function injuryImpact(day, inj, sessions) {
+  if (!inj) return null;
+  const planned = plannedGroups(day);
+  const blocked = g => inj.blocks.indexOf(g) !== -1;
+  const ruledOut = planned.filter(blocked);
+  const allowed = planned.filter(g => !blocked(g));
+  const sess = sessions || [];
+  const against = sess.filter(s => blocked(groupOfType(s.type)));
+  const within = sess.filter(s => !blocked(groupOfType(s.type)));
+  const keySessionRuledOut = planned.length > 0 && blocked(planned[0]);
+  return {
+    planned, ruledOut, allowed, keySessionRuledOut,
+    status: !planned.length ? "rest-day" : keySessionRuledOut ? "key-session-ruled-out" : ruledOut.length ? "partly-affected" : "plan-unaffected",
+    against, within
+  };
+}
+
+/* Consecutive days (ending on iso) flagged with the same injury. */
+function injuryStreak(state, iso) {
+  const cur = injuryOn(state, iso);
+  if (!cur) return null;
+  const where = injuryWhere(cur);
+  const idx = ALL_DAYS.findIndex(d => d.d === iso);
+  if (idx < 0) return { days: 1, from: iso, pains: [cur.pain] };
+  let i = idx, from = iso;
+  const pains = [];
+  while (i >= 0) {
+    const inj = injuryOn(state, ALL_DAYS[i].d);
+    if (!inj || injuryWhere(inj) !== where) break;
+    from = ALL_DAYS[i].d;
+    pains.unshift(inj.pain);
+    i--;
+  }
+  return { days: idx - i, from, pains: pains.slice(-7) };
+}
+
+/* The one-day injury picture as the coach should read it. */
+function injuryForCoach(inj, day, sessions) {
+  if (!inj) return null;
+  const imp = injuryImpact(day, inj, sessions);
+  const lbl = s => (ACTIVITIES[s.type] || ACTIVITIES.other).label || s.type;
+  return {
+    where: injuryWhere(inj),
+    pain0to10: inj.pain,
+    activitiesRuledOut: inj.blocks.map(groupLabel),
+    activitiesStillAllowed: ACT_GROUP_ORDER.filter(g => inj.blocks.indexOf(g) === -1).map(groupLabel),
+    plannedActivities: imp.planned.map(groupLabel),
+    planImpact: imp.status,
+    keySessionRuledOut: imp.keySessionRuledOut,
+    sessionsLoggedWithinLimits: imp.within.map(lbl),
+    sessionsLoggedAgainstRestriction: imp.against.map(lbl),
+    athleteInjuryNote: inj.note.trim() || null
+  };
+}
+
+/* Injury picture across a run of plan days (a week, or the season to date). */
+function buildInjurySummary(days, state, rollups) {
+  let injuredDays = 0, keyOut = 0, partly = 0, within = 0, none = 0, against = 0, effOut = 0;
+  const episodes = [];
+  let cur = null, prevIdx = -2;
+  days.forEach((d, i) => {
+    const inj = injuryOn(state, d.d);
+    if (!inj) { cur = null; return; }
+    const r = rollups[d.d] || {};
+    const imp = injuryImpact(d, inj, r.sessions);
+    injuredDays++;
+    if (imp.keySessionRuledOut) { keyOut++; effOut += num(r.planEffort); }
+    else if (imp.ruledOut.length) partly++;
+    if (imp.against.length) against++;
+    else if (imp.within.length) within++;
+    else none++;
+    const where = injuryWhere(inj);
+    if (!cur || cur.where !== where || prevIdx !== i - 1) {
+      cur = { where, from: d.d, to: d.d, days: 0, pains: [], ruledOut: [], notes: [] };
+      episodes.push(cur);
+    }
+    prevIdx = i;
+    cur.to = d.d; cur.days++;
+    if (inj.pain) cur.pains.push(inj.pain);
+    inj.blocks.forEach(b => { const l = groupLabel(b); if (cur.ruledOut.indexOf(l) === -1) cur.ruledOut.push(l); });
+    if (inj.note.trim() && cur.notes.indexOf(inj.note.trim()) === -1) cur.notes.push(inj.note.trim());
+  });
+  if (!injuredDays) return null;
+  const lastIso = days[days.length - 1].d;
+  const ongoingFrom = iso(new Date(fromIso(lastIso).getTime() - DAY));
+  return {
+    injuredDays,
+    daysKeySessionRuledOut: keyOut,
+    daysPlanPartlyAffected: partly,
+    injuredDaysTrainedWithinLimits: within,
+    injuredDaysNoTraining: none,
+    injuredDaysTrainedAgainstRestriction: against,
+    plannedEffortRuledOut: Math.round(effOut),
+    episodes: episodes.slice(-6).map(e => ({
+      where: e.where, from: e.from, to: e.to, days: e.days,
+      ongoingAtEndOfPeriod: e.to >= ongoingFrom,
+      painFirst: e.pains.length ? e.pains[0] : null,
+      painLatest: e.pains.length ? e.pains[e.pains.length - 1] : null,
+      painMax: e.pains.length ? Math.max(...e.pains) : null,
+      activitiesRuledOut: e.ruledOut,
+      athleteNotes: e.notes.slice(-3)
+    }))
+  };
+}
+
+/* Shared coaching brief on how to treat injury data, used by all three prompts. */
+const INJURY_COACH_RULES = `INJURY DAYS: the athlete can flag a day as injured, giving the body part, side, pain 0-10 and which activity groups the injury rules out (e.g. running out, cycling and strength still fine). Treat these days as injury management, not as lapses:
+- A planned session whose key activity was ruled out by the injury is NOT a missed session. Never criticise skipping it; resting or swapping it was the correct call. Compliance and effort-vs-plan figures already exclude those days (the raw figures are kept in the ...IncludingInjuryDays fields for reference only).
+- Credit cross-training done in the still-allowed activities, and judge whether its load and intensity were sensible for someone carrying an injury.
+- Any session logged in a ruled-out activity ("against restriction") is the thing to name plainly and early - it is how short niggles become long layoffs.
+- Read weight, energy balance and fuelling against the reduced load: burn is lower on injured days, so a deficit can widen or narrow; tissue repair needs protein, so do not advise cutting harder while injured.
+- Read the pain trend (first vs latest vs max). Rising pain or an injury lasting more than about 7-10 days, pain 5+ out of 10, or a recurring same-site problem warrants recommending a physiotherapist or sports doctor. Otherwise give a conservative, pain-guided return: easy, short, pain-free, building gradually. Do not diagnose.
+- If the plan's upcoming key sessions or races are at risk, say what to protect and what to let go.`;
+
 /* ================= FITNESS TRAJECTORY ============= */
 const ANCHORS = [["2026-07-20", 410], ["2026-10-04", 372], ["2026-11-22", 358], ["2027-01-10", 348], ["2027-03-01", 326], ["2027-04-04", 312], ["2027-05-09", 308]];
 const expectedEq10k = dateIso => {
@@ -3455,7 +3645,7 @@ const _round = (v, p = 0) => v == null ? null : Math.round(v * Math.pow(10, p)) 
 function buildProgressSummary(rollups, state, cutoff) {
   const days = ALL_DAYS.filter(d => d.d <= cutoff);
   const R = d => rollups[d.d] || {};
-  const has = r => (r.sessions && r.sessions.length > 0) || num(r.intake) > 0 || num(r.morning && r.morning.weight) > 40 || (r.morning && (r.morning.rhr || r.morning.sleep || r.morning.energy));
+  const has = r => (r.sessions && r.sessions.length > 0) || num(r.intake) > 0 || num(r.morning && r.morning.weight) > 40 || (r.morning && (r.morning.rhr || r.morning.sleep || r.morning.energy)) || !!r.injury;
   const logged = days.filter(d => has(R(d)));
   const firstLogged = logged.length ? logged[0].d : null;
   const lastLogged = logged.length ? logged[logged.length - 1].d : null;
@@ -3484,6 +3674,7 @@ function buildProgressSummary(rollups, state, cutoff) {
   let planEff = 0, actEff = 0, actKcal = 0, mins = 0, trained = 0, planDays = 0;
   const actMinZ = emptyZones(), actEffZ = emptyZones(), planMinZ = emptyZones();
   let planDaysDone = 0, offPlanDays = 0;
+  let planDaysRaw = 0, planDaysDoneRaw = 0, injOutDays = 0, injOutEff = 0;
   const byAct = {};
   days.forEach(d => {
     const r = R(d);
@@ -3492,7 +3683,12 @@ function buildProgressSummary(rollups, state, cutoff) {
     actKcal += num(r.actKcal); mins += num(r.actMin);
     const askedFor = planWantsSession(d);
     const didTrain = !!(r.sessions && r.sessions.length);
-    if (askedFor) { planDays++; if (didTrain) planDaysDone++; }
+    /* A planned session whose key activity the athlete's injury rules out
+       leaves the compliance denominator: skipping it is the right call. */
+    const injOut = askedFor && !!r.injury && injuryImpact(d, r.injury, r.sessions).keySessionRuledOut;
+    if (askedFor) { planDaysRaw++; if (didTrain) planDaysDoneRaw++; }
+    if (injOut) { injOutDays++; injOutEff += num(r.planEffort); }
+    else if (askedFor) { planDays++; if (didTrain) planDaysDone++; }
     else if (didTrain) offPlanDays++;
     if (r.sessions && r.sessions.length) {
       trained++;
@@ -3516,10 +3712,14 @@ function buildProgressSummary(rollups, state, cutoff) {
     plannedDaysCompleted: planDaysDone,
     daysTrainedOffPlan: offPlanDays,
     compliancePct: planDays ? Math.round(100 * planDaysDone / planDays) : null,
+    plannedDaysRuledOutByInjury: injOutDays,
+    compliancePctIncludingInjuryDays: planDaysRaw ? Math.round(100 * planDaysDoneRaw / planDaysRaw) : null,
     totalMinutes: Math.round(mins),
     actualEffort: Math.round(actEff),
     plannedEffortToDate: Math.round(planEff),
-    effortVsPlanPct: planEff > 0 ? Math.round(100 * actEff / planEff) : null,
+    plannedEffortRuledOutByInjury: Math.round(injOutEff),
+    effortVsPlanPct: planEff - injOutEff > 0 ? Math.round(100 * actEff / (planEff - injOutEff)) : null,
+    effortVsPlanPctIncludingInjuryDays: planEff > 0 ? Math.round(100 * actEff / planEff) : null,
     intensityDistribution: {
       basis: "minutes of logged training, bucketed by the session's own RPE (easy 1-4, moderate 5-6, hard 7-10)",
       easyMin: Math.round(actMinZ.easy), moderateMin: Math.round(actMinZ.moderate),
@@ -3588,15 +3788,16 @@ function buildProgressSummary(rollups, state, cutoff) {
     return gap >= 0 && gap < back;
   });
   const bucket = arr => {
-    let t = 0, e = 0, bal = 0, bn = 0; const ws = [];
+    let t = 0, e = 0, bal = 0, bn = 0, inj = 0; const ws = [];
     arr.forEach(d => {
       const r = R(d);
+      if (r.injury) inj++;
       if (r.sessions && r.sessions.length) t++;
       e += num(r.actEffort);
       if (num(r.intake) > 0) { bal += num(r.balance); bn++; }
       const w = num(r.morning && r.morning.weight); if (w > 40) ws.push(w);
     });
-    return { trainedDays: t, effort: Math.round(e), avgBalanceKcal: bn ? Math.round(bal / bn) : null, avgWeightKg: ws.length ? _round(_avg(ws), 1) : null };
+    return { trainedDays: t, injuredDays: inj, effort: Math.round(e), avgBalanceKcal: bn ? Math.round(bal / bn) : null, avgWeightKg: ws.length ? _round(_avg(ws), 1) : null };
   };
   const last7 = window(cutoff, 7);
   const prev7 = days.filter(d => { const g = Math.round((fromIso(cutoff) - fromIso(d.d)) / DAY); return g >= 7 && g < 14; });
@@ -3614,7 +3815,8 @@ function buildProgressSummary(rollups, state, cutoff) {
   return {
     period: { from: firstLogged, to: lastLogged, days: spanDays, weeksCovered, generatedAt: new Date().toISOString() },
     goals: { race12k: "2027-04-04", halfMarathon: "2027-05-09" },
-    weight, training, energy, recovery, races, momentum, metabolism, fuelling
+    weight, training, energy, recovery, races, momentum, metabolism, fuelling,
+    injury: buildInjurySummary(days, state, rollups)
   };
 }
 
@@ -3646,6 +3848,9 @@ Rules:
 - 250–450 words. Use short paragraphs. You may use a few bold lead-ins, but no big headers and no markdown tables.
 - Do not give medical advice or diagnose; frame as training guidance.
 - Start the very first line with a short bracketed headline of max 8 words, e.g. "[On track, but ease the deficit]", then a blank line, then the report.
+- If "injury" is non-null, weave it into the headline, training, fuelling and next-block orders (and allow up to 520 words). If it is null, do not mention injuries.
+
+${INJURY_COACH_RULES}
 ${priorLine}
 
 DATA:
@@ -3681,7 +3886,7 @@ function buildWeekSummary(rollups, state, week, metab) {
   const dayRows = week.days.map(d => rollups[d.d]).filter(Boolean);
   let trained = 0, planned = 0, effort = 0, planEffort = 0, sessKcal = 0, mins = 0;
   const wMinZ = emptyZones(), wPlanMinZ = emptyZones();
-  let plannedDone = 0, offPlan = 0;
+  let plannedDone = 0, offPlan = 0, plannedRaw = 0, plannedDoneRaw = 0, injOut = 0, injOutEff = 0;
   let intakeSum = 0, burnSum = 0, foodDays = 0, protMet = 0, protAny = 0, protKgSum = 0;
   const ws = [];
   const actTally = {};
@@ -3691,7 +3896,11 @@ function buildWeekSummary(rollups, state, week, metab) {
     const w = num(r.morning && r.morning.weight); if (w > 40) { latestW = w; ws.push(w); }
     const askedFor = planWantsSession(d);
     const didTrain = !!(r.sessions && r.sessions.length);
-    if (askedFor) { planned++; if (didTrain) plannedDone++; }
+    const dayInj = injuryOn(state, d.d);
+    const ruledOut = askedFor && !!dayInj && injuryImpact(d, dayInj, r.sessions).keySessionRuledOut;
+    if (askedFor) { plannedRaw++; if (didTrain) plannedDoneRaw++; }
+    if (ruledOut) { injOut++; injOutEff += num(r.planEffort); }
+    else if (askedFor) { planned++; if (didTrain) plannedDone++; }
     else if (didTrain) offPlan++;
     if (r.sessions && r.sessions.length) {
       trained++;
@@ -3716,7 +3925,10 @@ function buildWeekSummary(rollups, state, week, metab) {
     daysTrained: trained, daysPlanned: planned,
     plannedDaysCompleted: plannedDone, daysTrainedOffPlan: offPlan,
     compliancePct: planned ? Math.round(100 * plannedDone / planned) : null,
+    plannedDaysRuledOutByInjury: injOut,
+    compliancePctIncludingInjuryDays: plannedRaw ? Math.round(100 * plannedDoneRaw / plannedRaw) : null,
     minutes: Math.round(mins), effort: Math.round(effort), plannedEffort: Math.round(planEffort),
+    plannedEffortRuledOutByInjury: Math.round(injOutEff),
     intensityMinutes: {
       easy: Math.round(wMinZ.easy), moderate: Math.round(wMinZ.moderate),
       hard: Math.round(wMinZ.hard), unrated: Math.round(wMinZ.unknown),
@@ -3729,7 +3941,8 @@ function buildWeekSummary(rollups, state, week, metab) {
     avgBalanceKcal: foodDays ? Math.round((intakeSum - burnSum) / foodDays) : null,
     proteinMetPct: protAny ? Math.round(100 * protMet / protAny) : null,
     avgProtein_gPerKg: protAny ? Math.round(protKgSum / protAny * 100) / 100 : null,
-    meanWeightKg: ws.length ? Math.round(ws.reduce((a, b) => a + b, 0) / ws.length * 10) / 10 : null
+    meanWeightKg: ws.length ? Math.round(ws.reduce((a, b) => a + b, 0) / ws.length * 10) / 10 : null,
+    injury: buildInjurySummary(week.days, state, rollups)
   };
 }
 
@@ -3743,6 +3956,10 @@ async function analyseWeek(weekSum, prev) {
 Here is last week's snapshot as JSON${prev ? ", plus the week before for comparison" : ""}. Effort is MET×hours×RPE. avgBalanceKcal negative = calorie deficit. proteinMetPct = share of food-logged days hitting the protein floor. compliancePct = share of the days the plan asked for a session (rest and travel days excluded) that got one; daysTrainedOffPlan = extra sessions done on rest days. intensityMinutes splits the week's training MINUTES by each session's own RPE (easy 1-4, moderate 5-6, hard 7-10); compare sharePct with plannedSharePct, and treat a growing moderate share as easy runs drifting too hard. unrated = logged without an RPE, a data gap rather than a zone.
 
 Write 60–110 words, warm but candid: one line on how the week went (training + weight/fuelling together), one concrete win, one thing to fix next week. No headers, no bullet lists, no markdown tables. Start with a 3–6 word bold **lead-in** then a colon, then the digest. Use their real numbers. Do not invent data; if a whole area is blank, say what to log.
+
+If THIS WEEK has a non-null "injury", the week must be judged around it (allow up to 140 words): say how well the injury was managed, count the ruled-out sessions as correctly skipped rather than missed, credit cross-training within limits, and make next week's fix about the injury where it matters (pain trend, return-to-activity steps, or seeing a physio). If "injury" is null, do not mention injuries.
+
+${INJURY_COACH_RULES}
 
 THIS WEEK:
 ${JSON.stringify(weekSum)}${prev ? "\n\nWEEK BEFORE:\n" + JSON.stringify(prev) : ""}`;
@@ -3804,7 +4021,7 @@ function buildAuditCsv(rollups, state, cutoff) {
   const cols = ["Date", "Weekday", "Week", "Phase", "Planned", "Weight kg", "RHR", "Sleep h", "Energy 1-5",
     "Sessions", "Session detail", "Act kcal", "BMR", "Total burn", "Intake kcal", "Food detail", "Balance kcal",
     "Carbs g", "Protein g", "Fat g", "kcal target", "Protein tgt g", "Carb tgt g", "Protein met",
-    "Act effort", "Easy min", "Moderate min", "Hard min", "Unrated min", "Followed plan", "Notes"];
+    "Act effort", "Easy min", "Moderate min", "Hard min", "Unrated min", "Followed plan", "Injury", "Pain 0-10", "Ruled out", "Notes"];
   const metab = estimateMetabolism(rollups, state, cutoff);
   const prof = state.profile, fuelCfg = normFuel(state.fuel);
   let auditW = metab.weightKg;
@@ -3821,7 +4038,8 @@ function buildAuditCsv(rollups, state, cutoff) {
     const macro = (food.items || []).reduce((a, it) => ({ c: a.c + num(it.carbs), p: a.p + num(it.protein), f: a.f + num(it.fat) }), { c: 0, p: 0, f: 0 });
     const notes = (state.logs[d.d] && state.logs[d.d].notes) || "";
     const flag = (state.logs[d.d] && state.logs[d.d].adherence) || "";
-    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim()) || flag || !!foodDetailLine(food);
+    const injA = injuryOn(state, d.d);
+    const anyData = sess.length > 0 || num(r.intake) > 0 || num(m.weight) > 40 || m.rhr || m.sleep || m.energy || (notes && notes.trim()) || flag || !!foodDetailLine(food) || !!injA;
     if (!anyData) return;
     const detail = sess.map(s => {
       const spec = ACTIVITIES[s.type] || ACTIVITIES.other;
@@ -3850,6 +4068,9 @@ function buildAuditCsv(rollups, state, cutoff) {
       Math.round(num(r.actMinZone && r.actMinZone.easy)), Math.round(num(r.actMinZone && r.actMinZone.moderate)),
       Math.round(num(r.actMinZone && r.actMinZone.hard)), Math.round(num(r.actMinZone && r.actMinZone.unknown)),
       (flag && ADHERENCE[flag]) ? ADHERENCE[flag].label : "",
+      injA ? injuryWhere(injA) + (injA.note.trim() ? " - " + injA.note.trim() : "") : "",
+      injA && injA.pain ? injA.pain : "",
+      injA ? injA.blocks.map(groupLabel).join(" / ") : "",
       notes
     ]);
   });
@@ -3857,7 +4078,7 @@ function buildAuditCsv(rollups, state, cutoff) {
     nTrain + " trained", tMin + " min", Math.round(tKcal), "", Math.round(tBurn),
     nFood ? Math.round(tIntake) : "", nFood ? nFood + " days logged" : "", nFood ? Math.round(tIntake - tBurn) : "",
     "", "", "", "", "", "", "", Math.round(tEff),
-    Math.round(tMinZ.easy), Math.round(tMinZ.moderate), Math.round(tMinZ.hard), Math.round(tMinZ.unknown), "", ""];
+    Math.round(tMinZ.easy), Math.round(tMinZ.moderate), Math.round(tMinZ.hard), Math.round(tMinZ.unknown), "", "", "", "", ""];
   const meta = "coach-data-audit  generated " + new Date().toISOString() + "  \u00b7 maintenance " + metab.restMaintenance + " kcal (" + metab.source + ")  \u00b7 calorie figures are estimates, \u00b115%";
   const lines = [];
   lines.push(csvCell(meta));
@@ -4136,7 +4357,8 @@ function pruneState(s) {
     const hasNotes = !!(d.notes && String(d.notes).trim());
     const hasFlag = !!d.adherence;
     const hasCoach = !!(d.coachNote && d.coachNote.text);
-    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes && !hasFlag && !hasCoach) {
+    const hasInjury = !!d.injury;
+    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury) {
       changed = true;
       return; // drop the fully-empty day entirely
     }
@@ -4213,7 +4435,8 @@ function App() {
     const hasNotes = !!(d.notes && String(d.notes).trim());
     const hasFlag = !!d.adherence;
     const hasCoach = !!(d.coachNote && d.coachNote.text);
-    return !hasMorning && !hasSessions && !hasFood && !hasNotes && !hasFlag && !hasCoach;
+    const hasInjury = !!d.injury;
+    return !hasMorning && !hasSessions && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury;
   };
   const patchDay = (dIso, patch) => {
     const cur = state.logs[dIso] || {
@@ -4357,6 +4580,7 @@ function App() {
         sessions,
         morning: l?.morning || {},
         food: l?.food || null,
+        injury: normInjury(l?.injury),
         intake,
         bmr: dayBmr,
         totalBurn: dayBmr + ak,
@@ -4474,7 +4698,7 @@ function App() {
     if (last === todayIso || autoDigestRef.current) return;
     const metab = estimateMetabolism(rollups, state, w.days[6].d);
     const sum = buildWeekSummary(rollups, state, w, metab);
-    if (!(sum.daysTrained > 0 || sum.foodLoggedDays > 0)) return;
+    if (!(sum.daysTrained > 0 || sum.foodLoggedDays > 0 || sum.injury)) return;
     autoDigestRef.current = true;
     try { localStorage.setItem("last_auto_digest_day", todayIso); } catch (e) {}
     const prevW = PLAN.weeks.find(x => x.n === w.n - 1);
@@ -4749,7 +4973,15 @@ function App() {
       borderColor: ADHERENCE[log.adherence].border,
       color: ADHERENCE[log.adherence].color
     }
-  }, ADHERENCE[log.adherence].short)), /*#__PURE__*/React.createElement("div", {
+  }, ADHERENCE[log.adherence].short), injuryOn(state, activeIso) && /*#__PURE__*/React.createElement("span", {
+    className: "text-xs px-2 py-0.5 rounded border font-semibold",
+    style: {
+      ...mono,
+      background: INJ_TONE.bg,
+      borderColor: INJ_TONE.border,
+      color: INJ_TONE.color
+    }
+  }, "INJURED")), /*#__PURE__*/React.createElement("div", {
     className: "text-base leading-relaxed font-medium"
   }, adjPlan), taskNote && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 text-sm rounded px-3 py-2 border font-medium",
@@ -4757,7 +4989,27 @@ function App() {
       background: ready.level === "red" ? "#FAE9E7" : "#FBF3E4",
       borderColor: ready.level === "red" ? "#E5B3AF" : "#E8D5AC"
     }
-  }, taskNote), /*#__PURE__*/React.createElement("div", {
+  }, taskNote), (() => {
+    const inj = injuryOn(state, activeIso);
+    if (!inj) return null;
+    const imp = injuryImpact(day, inj, dayR.sessions);
+    const where = capFirst(injuryWhere(inj)) + (inj.pain ? " \u00b7 pain " + inj.pain + "/10" : "");
+    const msg = imp.status === "key-session-ruled-out"
+      ? "The planned " + groupLabel(imp.planned[0]).toLowerCase() + " is off today" + (imp.allowed.length ? "; " + imp.allowed.map(groupLabel).join(", ").toLowerCase() + " can still go ahead." : " \u2014 rest, or pick an activity you can still do, easy and pain-free.")
+      : imp.status === "partly-affected"
+        ? "Skip the " + imp.ruledOut.map(groupLabel).join(", ").toLowerCase() + " part; the rest can go ahead if pain-free."
+        : imp.status === "plan-unaffected" ? "Today's plan doesn't use what you've ruled out \u2014 go ahead if pain-free." : "Rest day \u2014 let it settle.";
+    return /*#__PURE__*/React.createElement("div", {
+      className: "mt-3 text-sm rounded px-3 py-2 border font-medium",
+      style: { background: INJ_TONE.bg, borderColor: INJ_TONE.border }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: { ...mono, color: INJ_TONE.color },
+      className: "text-xs font-bold mr-2"
+    }, "INJURY \u00b7 " + where), msg, inj.blocks.length ? /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-gray-600 mt-1",
+      style: mono
+    }, "ruled out: " + inj.blocks.map(groupLabel).join(", ").toLowerCase()) : null);
+  })(), /*#__PURE__*/React.createElement("div", {
     className: "mt-3 text-sm text-gray-600 border-t pt-3",
     style: {
       borderColor: "#00000012"
@@ -4891,7 +5143,14 @@ function App() {
     }
   }), /*#__PURE__*/React.createElement("span", null, "Mountain night \u2014 at altitude (RHR typically runs higher)")), /*#__PURE__*/React.createElement("div", {
     className: "mt-3 text-xs text-gray-600 leading-relaxed"
-  }, ready.reasons.length ? ready.reasons.join("; ") + "." : ready.base ? `All clear. RHR baseline ${ready.base} bpm.` : "Log RHR on 3+ mornings to activate the readiness engine.")), /*#__PURE__*/React.createElement(Card, {
+  }, ready.reasons.length ? ready.reasons.join("; ") + "." : ready.base ? `All clear. RHR baseline ${ready.base} bpm.` : "Log RHR on 3+ mornings to activate the readiness engine.")), /*#__PURE__*/React.createElement(InjuryCard, {
+    key: "inj-" + activeIso,
+    activeIso: activeIso,
+    day: day,
+    dayR: dayR,
+    state: state,
+    patchDay: patchDay
+  }), /*#__PURE__*/React.createElement(Card, {
     className: "p-5"
   }, /*#__PURE__*/React.createElement(Eyebrow, null, "CURRENT TRAINING PACES"), /*#__PURE__*/React.createElement("div", {
     className: "mt-3 space-y-1.5",
@@ -4974,6 +5233,104 @@ function App() {
   }), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-400 text-center pt-2"
   }, "A framework, not a prescription. Calorie estimates use standard MET \xD7 weight \xD7 hours (\xB115%); effort index and readiness flags are heuristics, not diagnoses.")));
+}
+
+
+/* ================= INJURY CARD (Today) =================
+   Flag the day as injured: where, which side, pain 0-10, and which kinds of
+   training are off. Turning it on prefills from the last injured day (within 3
+   days) so a multi-day injury is one tap per morning. */
+function InjuryCard({ activeIso, day, dayR, state, patchDay }) {
+  const h = React.createElement;
+  const inj = injuryOn(state, activeIso);
+  const idx = ALL_DAYS.findIndex(d => d.d === activeIso);
+  let prior = null;
+  for (let i = idx - 1; i >= 0 && i >= idx - 3; i--) {
+    const p = injuryOn(state, ALL_DAYS[i].d);
+    if (p) { prior = { iso: ALL_DAYS[i].d, inj: p }; break; }
+  }
+  const save = next => patchDay(activeIso, { injury: next });
+  const set = patch => save({ ...inj, ...patch });
+  const toggleIn = (arr, v) => arr.indexOf(v) === -1 ? [...arr, v] : arr.filter(x => x !== v);
+  const turnOn = () => save(prior ? { ...prior.inj } : { parts: [], side: "", pain: null, blocks: ["run"], note: "" });
+  const turnOff = () => save(null);
+  const imp = inj ? injuryImpact(day, inj, dayR.sessions) : null;
+  const streak = inj ? injuryStreak(state, activeIso) : null;
+  const SEL = { color: "#3B5670", bg: "#EAF1F8", border: "#C3D3E2" };
+  const chip = (key, on, label, onClick, tone) => h("button", {
+    key, onClick,
+    className: "px-2.5 py-1 rounded border text-xs font-semibold transition-colors",
+    style: { ...mono, background: on ? tone.bg : "#fff", borderColor: on ? tone.border : "#D6DAD2", color: on ? tone.color : "#6B7472" }
+  }, label);
+  const lab = t => h("div", { className: "text-xs uppercase tracking-wide text-gray-500 mt-3", style: mono }, t);
+  const listText = arr => arr.map(groupLabel).join(", ").toLowerCase();
+
+  if (!inj) {
+    return h(Card, { className: "p-5" },
+      h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+        h(Eyebrow, null, "INJURY"),
+        h("button", { onClick: turnOn, className: "px-3 py-1.5 rounded border text-xs font-semibold", style: { ...mono, borderColor: INJ_TONE.border, color: INJ_TONE.color, background: "#fff" } },
+          prior ? "STILL INJURED" : "I'M INJURED")),
+      h("div", { className: "text-xs text-gray-600 mt-2 leading-relaxed" },
+        prior
+          ? "You flagged " + injuryWhere(prior.inj) + " on " + fmtDate(prior.iso) + ". Tap if it's still there \u2014 it carries over the same details, which you can then adjust."
+          : "Carrying a niggle or injury? Flag it here with what it rules out. The coach then treats skipped sessions as injury management rather than missed work, and credits what you can still do."));
+  }
+
+  let impactMsg = null, impactTone = SEL;
+  if (imp.status === "key-session-ruled-out") {
+    impactTone = INJ_TONE;
+    impactMsg = "Today's planned " + groupLabel(imp.planned[0]).toLowerCase() + " is off. Skipping it counts as managing the injury, not as a missed session." +
+      (imp.allowed.length ? " Still fine from today's plan: " + listText(imp.allowed) + "." : "") +
+      " If you want to move, pick something you can still do, keep it easy and pain-free.";
+  } else if (imp.status === "partly-affected") {
+    impactTone = { color: "#8A6D3B", bg: "#FBF3E4", border: "#E8D5AC" };
+    impactMsg = "Part of today's plan (" + listText(imp.ruledOut) + ") is off; the rest (" + listText(imp.allowed) + ") can go ahead if it stays pain-free.";
+  } else if (imp.status === "plan-unaffected") {
+    impactTone = { color: "#2E7D4F", bg: "#E9F3EC", border: "#BFD9C8" };
+    impactMsg = "Today's plan (" + listText(imp.planned) + ") doesn't use anything you've ruled out \u2014 go ahead if it stays pain-free.";
+  } else {
+    impactMsg = "Rest day on the plan \u2014 good timing for it to settle.";
+  }
+
+  return h(Card, { className: "p-5", style: { borderColor: INJ_TONE.border } },
+    h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+      h(Eyebrow, { color: INJ_TONE.color }, "INJURY" + (streak && streak.days > 1 ? " \u00b7 DAY " + streak.days : "")),
+      h("button", { onClick: turnOff, className: "text-xs px-2 py-1 rounded border", style: { ...mono, borderColor: "#BFD9C8", color: "#2E7D4F", background: "#fff" }, title: "Clear the injury flag for this day" }, "NOT INJURED TODAY")),
+    streak && streak.days > 1 && h("div", { className: "text-xs text-gray-500 mt-1", style: mono }, "since " + fmtDate(streak.from)),
+
+    lab("Where"),
+    h("div", { className: "flex flex-wrap gap-1 mt-2" },
+      INJURY_PARTS.map(([k, l]) => chip(k, inj.parts.indexOf(k) !== -1, l.toUpperCase(), () => set({ parts: toggleIn(inj.parts, k) }), SEL))),
+    h("div", { className: "flex flex-wrap gap-1 mt-2" },
+      INJURY_SIDES.map(([k, l]) => chip(k, inj.side === k, l.toUpperCase(), () => set({ side: inj.side === k ? "" : k }), SEL))),
+
+    lab("Pain 1-10"),
+    h("div", { className: "flex flex-wrap gap-1 mt-2" },
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => chip("p" + n, inj.pain === n, String(n), () => set({ pain: inj.pain === n ? null : n }),
+        n <= 3 ? { color: "#2E7D4F", bg: "#E9F3EC", border: "#BFD9C8" } : n <= 6 ? { color: "#C08A1E", bg: "#FBF3E4", border: "#E8D5AC" } : INJ_TONE))),
+
+    lab("Can't do today \u00b7 tap to rule out"),
+    h("div", { className: "flex flex-wrap gap-1 mt-2" },
+      ACT_GROUP_ORDER.map(g => chip(g, inj.blocks.indexOf(g) !== -1, (inj.blocks.indexOf(g) !== -1 ? "\u2715 " : "") + ACT_GROUPS[g].short, () => set({ blocks: toggleIn(inj.blocks, g) }), INJ_TONE))),
+    h("div", { className: "text-xs text-gray-500 mt-1" },
+      inj.blocks.length
+        ? "Still OK: " + (ACT_GROUP_ORDER.filter(g => inj.blocks.indexOf(g) === -1).map(groupLabel).join(", ").toLowerCase() || "nothing") + "."
+        : "Nothing ruled out yet \u2014 tick what the injury stops you doing."),
+
+    h("input", {
+      value: inj.note,
+      onChange: e => set({ note: e.target.value }),
+      placeholder: "What happened, what aggravates it, physio advice\u2026",
+      className: "w-full mt-3 px-3 py-2 rounded border text-sm",
+      style: { borderColor: "#D6DAD2" }
+    }),
+
+    h("div", { className: "mt-3 text-xs rounded px-3 py-2 border leading-relaxed", style: { background: impactTone.bg, borderColor: impactTone.border, color: "#1C2321" } }, impactMsg),
+    imp.against.length > 0 && h("div", { className: "mt-2 text-xs rounded px-3 py-2 border leading-relaxed font-semibold", style: { background: INJ_TONE.bg, borderColor: INJ_TONE.border, color: INJ_TONE.color } },
+      "You've logged " + imp.against.map(x => (ACTIVITIES[x.type] || ACTIVITIES.other).label.toLowerCase()).join(", ") + " today, which you've ruled out. The coach will flag it."),
+    h("div", { className: "text-xs text-gray-500 mt-2" },
+      "Pain that's rising, 5+ out of 10, or still there after a week or so is worth a physio's eye."));
 }
 
 /* ================= SESSION LIST ================= */
@@ -5840,6 +6197,8 @@ function WeekView({
     const txt = fut ? adjustPlanText(d.p, engine.qDelta, engine.eDelta) : d.p;
     const done = r.sessions.length > 0;
     const missed = !done && d.d < todayIso && planWantsSession(d);
+    const wInj = r.injury;
+    const injSkip = missed && !!wInj && injuryImpact(d, wInj, r.sessions).keySessionRuledOut;
     return /*#__PURE__*/React.createElement("button", {
       key: d.d,
       onClick: () => onGoDay(d.d),
@@ -5862,9 +6221,9 @@ function WeekView({
     })), /*#__PURE__*/React.createElement("div", {
       className: "mt-1 text-xs",
       style: {
-        color: done ? "#2E7D4F" : missed ? "#B3272D" : "#B7BCC7"
+        color: done ? "#2E7D4F" : injSkip ? "#C08A1E" : missed ? "#B3272D" : "#B7BCC7"
       }
-    }, done ? `✓ ${r.actEffort}` : missed ? "missed" : "·")), /*#__PURE__*/React.createElement("div", {
+    }, done ? `✓ ${r.actEffort}` : injSkip ? "injured" : missed ? "missed" : "·")), /*#__PURE__*/React.createElement("div", {
       className: "flex-1 min-w-0"
     }, /*#__PURE__*/React.createElement("div", {
       className: "flex items-center gap-2 flex-wrap"
@@ -5878,7 +6237,11 @@ function WeekView({
     }, KIND_LABEL[d.k]), d.km > 0 && /*#__PURE__*/React.createElement("span", {
       style: mono,
       className: "text-xs text-gray-500"
-    }, "~", d.km, " km"), r.sessions.map(s => /*#__PURE__*/React.createElement("span", {
+    }, "~", d.km, " km"), wInj && /*#__PURE__*/React.createElement("span", {
+      className: "text-xs px-1.5 py-0.5 rounded border font-semibold",
+      style: { ...mono, fontSize: 10, background: INJ_TONE.bg, borderColor: INJ_TONE.border, color: INJ_TONE.color },
+      title: "Injured: " + injuryWhere(wInj) + (wInj.blocks.length ? " \u00b7 no " + wInj.blocks.map(groupLabel).join(", ").toLowerCase() : "")
+    }, "INJURED \u00b7 " + (wInj.parts.length ? wInj.parts.map(p => INJURY_PART_LABEL[p]).join("/").toUpperCase() : "?")), r.sessions.map(s => /*#__PURE__*/React.createElement("span", {
       key: s.id,
       className: "text-xs px-1.5 py-0.5 rounded border",
       style: {
@@ -6363,6 +6726,7 @@ function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state
       trained: !!(r.sessions && r.sessions.length),
       effortIndex: Math.round(num(r.actEffort)),
       followedPlan: l.adherence && ADHERENCE[l.adherence] ? ADHERENCE[l.adherence].label : null,
+      injury: (() => { const ij = injuryOn(state, d.d); return ij ? { where: injuryWhere(ij), pain0to10: ij.pain, ruledOut: ij.blocks.map(groupLabel), trainedAgainstRestriction: injuryImpact(d, ij, r.sessions).against.length > 0 } : null; })(),
       note: l.notes && String(l.notes).trim() ? String(l.notes).trim().slice(0, 160) : null
     };
   });
@@ -6412,6 +6776,14 @@ function buildDayContext({ activeIso, day, week, log, dayR, ready, engine, state
       carbs_g: Math.round(lm.carbs), protein_g: Math.round(lm.protein), fat_g: Math.round(lm.fat),
       target: { kcal: tgt.kcal, protein_g: tgt.protein_g, carbs_g: tgt.carbs_g, stance: tgt.stance }
     } : { logged: false, target: { kcal: tgt.kcal, protein_g: tgt.protein_g, carbs_g: tgt.carbs_g, stance: tgt.stance } },
+    injury: (() => {
+      const ij = injuryOn(state, activeIso);
+      if (!ij) return null;
+      const o = injuryForCoach(ij, day, dayR.sessions);
+      const st = injuryStreak(state, activeIso);
+      if (st) { o.dayOfThisInjury = st.days; o.injuryStartedOn = st.from; o.painTrendRecentDays = st.pains; }
+      return o;
+    })(),
     previous7Days: recent,
     athletesNote: (log.notes || "").trim()
   };
@@ -6439,7 +6811,10 @@ Rules:
 - If the note is empty or very thin, say so briefly, tell them what is worth writing down next time, and coach off the numbers you do have.
 - If the adherence flag says they adapted the session, did something else, or did not train, address that head-on: was it a smart call or the start of a pattern?
 - Take pain, injury and illness seriously; advise conservatively and point them to a professional when it warrants. Do not diagnose.
+- If "injury" is non-null, make it central: acknowledge where it hurts and the pain level, and if the key session was ruled out, treat not doing it as the right call (do not treat a "didn't train" or "something else" flag as a lapse on such a day). Say whether any substitute was sensible, and make the instruction for the next session fit the injury. Use dayOfThisInjury and the pain trend (also visible in previous7Days) to judge whether it is settling. You may use up to 200 words.
 - Start with a 3-6 word bold **lead-in** followed by a colon, then the reply.
+
+${INJURY_COACH_RULES}
 
 THE DAY:
 ${JSON.stringify(ctx)}`;
@@ -6531,6 +6906,8 @@ function DayCoachCard({ activeIso, day, week, log, dayR, ready, engine, state, r
       }, "\u2715")),
     h("div", { className: "text-xs text-gray-500 mt-2" },
       "A senior coach reads this note alongside the day's plan, session, readiness and fuelling, then tells you what it means for the next one."),
+    injuryOn(state, activeIso) && h("div", { className: "text-xs mt-1", style: { ...mono, color: INJ_TONE.color } },
+      "Injury flagged (" + injuryWhere(injuryOn(state, activeIso)) + ") \u2014 the coach will read the day around it."),
     err && h("div", { className: "text-sm text-red-700 mt-2" }, err),
     fb && h("div", { className: "mt-3 rounded-lg border p-3", style: { borderColor: "#E6DFCD", background: "#FCFBF7" } },
       h("div", { className: "flex items-baseline justify-between gap-2 flex-wrap" },
@@ -6829,7 +7206,8 @@ function ProgressView({
   const series = [];
   let totalDaysWithPlan = 0,
     daysWithActual = 0,
-    daysTrainedOffPlan = 0;
+    daysTrainedOffPlan = 0,
+    daysInjuryExcused = 0;
   ALL_DAYS.forEach(d => {
     const r = rollups[d.d];
     cP += r.planEffort;
@@ -6848,7 +7226,9 @@ function ProgressView({
       }
       const askedFor = planWantsSession(d);
       const didTrain = r.sessions.length > 0;
-      if (askedFor) { totalDaysWithPlan++; if (didTrain) daysWithActual++; }
+      const injOut = askedFor && !!r.injury && injuryImpact(d, r.injury, r.sessions).keySessionRuledOut;
+      if (injOut) daysInjuryExcused++;
+      else if (askedFor) { totalDaysWithPlan++; if (didTrain) daysWithActual++; }
       else if (didTrain) daysTrainedOffPlan++;
     }
     series.push({
@@ -6945,8 +7325,8 @@ function ProgressView({
   }, "Where the plan expected you to be, vs where you actually are.")), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-gray-500 text-right",
     style: mono,
-    title: "Of the days the plan asked you to train (rest and travel days excluded), how many you logged a session on. Off-plan = sessions done on rest or travel days, which don't count either way."
-  }, "days done ", daysWithActual, " / ", totalDaysWithPlan, " planned", daysTrainedOffPlan > 0 ? " (+" + daysTrainedOffPlan + " off-plan)" : "", /*#__PURE__*/React.createElement("br", null), "compliance ", compliance, "%")), /*#__PURE__*/React.createElement("div", {
+    title: "Of the days the plan asked you to train (rest and travel days excluded), how many you logged a session on. Off-plan = sessions done on rest or travel days, which don't count either way. Injury-excused = planned sessions your injury flag ruled out; they leave the calculation."
+  }, "days done ", daysWithActual, " / ", totalDaysWithPlan, " planned", daysTrainedOffPlan > 0 ? " (+" + daysTrainedOffPlan + " off-plan)" : "", daysInjuryExcused > 0 ? " \u00b7 " + daysInjuryExcused + " injury-excused" : "", /*#__PURE__*/React.createElement("br", null), "compliance ", compliance, "%")), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-2 md:grid-cols-4 gap-6 mt-4"
   }, /*#__PURE__*/React.createElement(KPI, {
     label: "Effort actual",
