@@ -27,6 +27,39 @@
 @media (min-width:768px){.md\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}}
 
 html, body { margin: 0; background: #F7F8F5; }
+/* strength pills */
+.pill-rows{margin-top:.75rem;display:flex;flex-direction:column;gap:1rem}
+.pill-row{padding-top:.75rem;border-top:1px solid #EDEFE9}
+.pill-row:first-child{border-top:0;padding-top:0}
+.pill-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;flex-wrap:wrap}
+.pill-name{display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.95rem}
+.pill-flag{display:inline-flex;align-items:center;justify-content:center;width:1.1rem;height:1.1rem;border-radius:999px;border:1.5px solid;color:#fff;font-size:.7rem;line-height:1}
+.pill-count{font-size:.85rem}
+.pill-left{font-size:.75rem;margin-left:.25rem}
+.pill-track{position:relative;height:14px;margin-top:.45rem;border-radius:999px;background:#F2F3EF;box-shadow:inset 0 0 0 1px #E6E8E2}
+.pill-caps{position:absolute;inset:2px 2px 2px 3px;display:flex;gap:3px;overflow:hidden}
+.pill-cap{flex:none;height:100%;min-width:4px;border-radius:999px;transform-origin:left center;animation:pillIn .28s ease-out}
+.pill-mark{position:absolute;top:-3px;bottom:-3px;width:2px;background:#1C2321;border-radius:1px}
+@keyframes pillIn{from{transform:scaleX(.2);opacity:.3}to{transform:scaleX(1);opacity:1}}
+@media (prefers-reduced-motion:reduce){.pill-cap{animation:none}}
+.pill-actions,.pill-custom{display:flex;flex-wrap:wrap;gap:.375rem;margin-top:.55rem;align-items:center}
+.pill-quick{padding:.3rem .6rem;border:1px solid;border-radius:999px;font-size:.75rem;font-weight:600;line-height:1.2}
+.pill-quick:hover{filter:brightness(.96)}
+.pill-quick:focus-visible,.pill-x:focus-visible,.pill-in:focus-visible,.pill-week:focus-visible{outline:2px solid #1C2321;outline-offset:2px}
+.pill-in{padding:.3rem .5rem;border:1px solid #D6DAD2;border-radius:.375rem;font-size:.85rem;background:#fff}
+.pill-chips{display:flex;flex-wrap:wrap;gap:.3rem;margin-top:.5rem}
+.pill-chip{display:inline-flex;align-items:center;gap:.15rem;padding:.1rem .15rem .1rem .5rem;border-radius:999px;background:#F2F3EF;font-size:.75rem;color:#4A524E}
+.pill-x{width:1.25rem;height:1.25rem;border-radius:999px;color:#6B7472;font-size:.85rem;line-height:1}
+.pill-x:hover{background:#E3E6E0;color:#B3272D}
+.pill-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem;margin-top:1rem}
+.pill-sum{border:1px solid;border-radius:.5rem;padding:.75rem .85rem}
+.pill-bar{height:4px;border-radius:999px;background:#fff;margin-top:.5rem;overflow:hidden}
+.pill-bar span{display:block;height:100%;border-radius:999px}
+.pill-charts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.75rem}
+.pill-week:hover{background:#F7F8F5}
+@media (max-width:900px){.pill-charts{grid-template-columns:1fr}}
+@media (max-width:640px){.pill-summary{grid-template-columns:1fr}}
+
 #boot { min-height: 100vh; display: flex; align-items: center; justify-content: center;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         color: #6B7472; font-size: 13px; letter-spacing: .18em; }
@@ -627,7 +660,8 @@ const {
   ResponsiveContainer,
   CartesianGrid,
   Cell,
-  LabelList
+  LabelList,
+  ReferenceLine
 } = Recharts;
 
 /* ================= DATA (42 weeks, 20 Jul 2026 - 9 May 2027) ================= */
@@ -4358,7 +4392,8 @@ function pruneState(s) {
     const hasFlag = !!d.adherence;
     const hasCoach = !!(d.coachNote && d.coachNote.text);
     const hasInjury = !!d.injury;
-    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury) {
+    const hasPills = logHasPills(d);
+    if (Object.keys(m).length === 0 && sessions.length === 0 && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury && !hasPills) {
       changed = true;
       return; // drop the fully-empty day entirely
     }
@@ -4436,7 +4471,8 @@ function App() {
     const hasFlag = !!d.adherence;
     const hasCoach = !!(d.coachNote && d.coachNote.text);
     const hasInjury = !!d.injury;
-    return !hasMorning && !hasSessions && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury;
+    const hasPills = logHasPills(d);
+    return !hasMorning && !hasSessions && !hasFood && !hasNotes && !hasFlag && !hasCoach && !hasInjury && !hasPills;
   };
   const patchDay = (dIso, patch) => {
     const cur = state.logs[dIso] || {
@@ -4487,6 +4523,12 @@ function App() {
     persist({
       ...state,
       coachReports: (state.coachReports || []).filter(r => r.id !== id)
+    });
+  };
+  const setPillTargets = t => {
+    persist({
+      ...state,
+      pillTargets: t
     });
   };
   const setFuel = fuel => {
@@ -4883,6 +4925,9 @@ function App() {
     id: "progress",
     label: "PROGRESS"
   }), /*#__PURE__*/React.createElement(NavBtn, {
+    id: "pills",
+    label: "STRENGTH PILLS"
+  }), /*#__PURE__*/React.createElement(NavBtn, {
     id: "objectives",
     label: "PLAN OBJECTIVES & INSTRUCTIONS"
   }), /*#__PURE__*/React.createElement(NavBtn, {
@@ -5039,7 +5084,15 @@ function App() {
     onChange: next => setSessions(activeIso, next),
     plannedKind: day.k,
     weightKg: num(log.morning.weight) > 40 ? num(log.morning.weight) : engine.avgW || 100
-  })), /*#__PURE__*/React.createElement(FoodCard, {
+  })), /*#__PURE__*/React.createElement(PillsCard, {
+    key: "pills-" + activeIso,
+    activeIso: activeIso,
+    todayIso: todayIso,
+    log: log,
+    state: state,
+    patchDay: patchDay,
+    onOpen: () => setView("pills")
+  }), /*#__PURE__*/React.createElement(FoodCard, {
     food: log.food,
     dayR: dayR,
     profile: state.profile,
@@ -5221,6 +5274,14 @@ function App() {
     deleteCoachReport: deleteCoachReport,
     saveDigest: saveDigest,
     deleteDigest: deleteDigest
+  }), view === "pills" && /*#__PURE__*/React.createElement(PillsView, {
+    state: state,
+    todayIso: todayIso,
+    setPillTargets: setPillTargets,
+    onGoDay: d => {
+      setSelIso(d);
+      setView("today");
+    }
   }), view === "objectives" && /*#__PURE__*/React.createElement(ObjectivesView, {
     state: state,
     engine: engine,
@@ -5235,6 +5296,317 @@ function App() {
   }, "A framework, not a prescription. Calorie estimates use standard MET \xD7 weight \xD7 hours (\xB115%); effort index and readiness flags are heuristics, not diagnoses.")));
 }
 
+
+/* ================= STRENGTH PILLS =================
+   Short bodyweight "pills" logged through the day instead of long sessions.
+   Stored per day as log.pills = { pushups: [{s, r, t}], plank: [...], squats: [...] }
+   where s = sets, r = reps per set (plank: seconds per hold), t = time logged.
+   Anything logged counts as the day's flag for that exercise; the totals are
+   the intensity. Targets live in state.pillTargets and ride the same sync. */
+const PILL_EX = [
+  { id: "pushups", label: "Push-ups", unit: "reps", color: "#6C4AB6", tint: "#EFEAF8", quick: [10, 15, 20, 25], defTarget: 50 },
+  { id: "plank",   label: "Plank",    unit: "sec",  color: "#3B7E9E", tint: "#E4F0F4", quick: [30, 45, 60, 90], defTarget: 180 },
+  { id: "squats",  label: "Squats",   unit: "reps", color: "#B35F1E", tint: "#F8EDE2", quick: [15, 20, 25, 30], defTarget: 100 }
+];
+const pillTargets = state => {
+  const t = (state && state.pillTargets) || {};
+  const o = {};
+  PILL_EX.forEach(e => { o[e.id] = num(t[e.id]) > 0 ? num(t[e.id]) : e.defTarget; });
+  return o;
+};
+const pillSets = (log, id) => ((log && log.pills && log.pills[id]) || []).filter(x => x && num(x.r) > 0 && num(x.s) > 0);
+const pillTotal = (log, id) => pillSets(log, id).reduce((a, x) => a + num(x.s) * num(x.r), 0);
+const pillSetCount = (log, id) => pillSets(log, id).reduce((a, x) => a + num(x.s), 0);
+const logHasPills = log => !!(log && log.pills && PILL_EX.some(e => pillSets(log, e.id).length > 0));
+/* Holds use the app's own time notation: 45" / 1'30" / 3'. */
+const fmtHold = sec => {
+  sec = Math.round(num(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (!m) return `${s}"`;
+  return s ? `${m}'${pad(s)}"` : `${m}'`;
+};
+const fmtPill = (id, v) => id === "plank" ? fmtHold(v) : String(Math.round(num(v)));
+/* "90", "90s", "90\"" -> 90 s;  "1:30", "1'30", "3'" -> minutes:seconds */
+const parseHold = str => {
+  const s = String(str == null ? "" : str).trim();
+  if (!s) return 0;
+  const m = s.match(/^(\d+)\s*[:'\u2019]\s*(\d{1,2})?/);
+  if (m) return num(m[1]) * 60 + num(m[2] || 0);
+  return Math.round(num(s.replace(/["s\u201d]/gi, "")));
+};
+const pillEntryText = (id, x) => (num(x.s) > 1 ? `${x.s}\u00d7` : "") + fmtPill(id, x.r);
+
+/* Per-day totals across a list of ISO dates, plus a trailing 7-day average
+   computed over calendar days (a skipped day counts as zero). */
+function pillSeries(state, isoList) {
+  const logs = (state && state.logs) || {};
+  const idxOf = Object.fromEntries(ALL_DAYS.map((d, i) => [d.d, i]));
+  const totalOn = (dIso, id) => pillTotal(logs[dIso], id);
+  return isoList.map(dIso => {
+    const row = { d: dIso, label: fromIso(dIso).toLocaleDateString("en-GB", { day: "numeric", month: "short" }) };
+    const i = idxOf[dIso];
+    PILL_EX.forEach(e => {
+      row[e.id] = totalOn(dIso, e.id);
+      let sum = 0, n = 0;
+      for (let k = i; k > i - 7 && k >= 0; k--) { sum += totalOn(ALL_DAYS[k].d, e.id); n++; }
+      row[e.id + "_avg"] = n ? Math.round(sum / n) : 0;
+    });
+    return row;
+  });
+}
+
+/* ---------- Today: log pills for the selected day ---------- */
+function PillsCard({ activeIso, todayIso, log, state, patchDay, onOpen }) {
+  const h = React.createElement;
+  const targets = pillTargets(state);
+  const [draft, setDraft] = useState({});
+  const [open, setOpen] = useState(null);
+  const saveSets = (id, sets) => {
+    const cur = { ...(log.pills || {}) };
+    if (sets.length) cur[id] = sets; else delete cur[id];
+    patchDay(activeIso, { pills: Object.keys(cur).length ? cur : undefined });
+  };
+  const stamp = () => activeIso === todayIso ? new Date().toTimeString().slice(0, 5) : "";
+  const add = (id, s, r) => {
+    s = Math.max(1, Math.min(20, Math.round(num(s)) || 1));
+    r = Math.round(num(r));
+    if (!(r > 0)) return;
+    const entry = { s, r };
+    const t = stamp();
+    if (t) entry.t = t;
+    saveSets(id, [...pillSets(log, id), entry]);
+  };
+  const removeAt = (id, i) => saveSets(id, pillSets(log, id).filter((_, k) => k !== i));
+  const d = id => draft[id] || { s: "1", r: "" };
+  const setD = (id, p) => setDraft({ ...draft, [id]: { ...d(id), ...p } });
+  const submitDraft = id => {
+    const cur = d(id);
+    const r = id === "plank" ? parseHold(cur.r) : num(cur.r);
+    if (!(r > 0)) return;
+    add(id, cur.s, id === "plank" ? Math.min(r, 900) : Math.min(r, 500));
+    setD(id, { r: "" });
+  };
+  const metCount = PILL_EX.filter(e => pillTotal(log, e.id) >= targets[e.id]).length;
+
+  const track = (e, sets, total, target) => {
+    const scale = Math.max(total, target) || 1;
+    const caps = [];
+    sets.forEach((x, i) => { for (let k = 0; k < num(x.s) && caps.length < 60; k++) caps.push({ key: i + "-" + k, v: num(x.r) }); });
+    return h("div", { className: "pill-track", "aria-hidden": "true" },
+      h("div", { className: "pill-caps" },
+        caps.map(c => h("span", { key: c.key, className: "pill-cap", style: { width: `calc(${(c.v / scale) * 100}% - 3px)`, background: e.color } }))),
+      total > target && h("span", { className: "pill-mark", style: { left: `${(target / scale) * 100}%` } }));
+  };
+
+  return h(Card, { className: "p-5" },
+    h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+      h(Eyebrow, { color: "#6C4AB6" }, "STRENGTH PILLS \u00b7 ", metCount, "/3 TARGETS"),
+      h("button", { onClick: onOpen, className: "text-xs px-2 py-1 rounded border", style: { ...mono, borderColor: "#D6DAD2", background: "#fff" } }, "PROGRESS")),
+    h("div", { className: "text-xs text-gray-500 mt-1" }, "Log each short bout as you do it. Tap a quick amount for one set, or enter sets \u00d7 amount."),
+    h("div", { className: "pill-rows" },
+      PILL_EX.map(e => {
+        const sets = pillSets(log, e.id);
+        const total = pillTotal(log, e.id);
+        const target = targets[e.id];
+        const met = total >= target;
+        const left = Math.max(0, target - total);
+        const isOpen = open === e.id;
+        return h("div", { key: e.id, className: "pill-row" },
+          h("div", { className: "pill-head" },
+            h("span", { className: "pill-name" },
+              h("span", { className: "pill-flag", style: { background: sets.length ? e.color : "transparent", borderColor: e.color } }, sets.length ? "\u2713" : ""),
+              e.label),
+            h("span", { className: "pill-count", style: mono },
+              h("b", { style: { color: met ? e.color : "#1C2321" } }, fmtPill(e.id, total)),
+              h("span", { className: "text-gray-500" }, " / ", fmtPill(e.id, target)),
+              h("span", { className: "pill-left", style: { color: met ? e.color : "#6B7472" } },
+                met ? (total > target ? ` +${fmtPill(e.id, total - target)}` : " done") : ` ${fmtPill(e.id, left)} to go`))),
+          track(e, sets, total, target),
+          h("div", { className: "pill-actions" },
+            e.quick.map(q => h("button", {
+              key: q, onClick: () => add(e.id, 1, q), className: "pill-quick",
+              style: { ...mono, color: e.color, borderColor: e.color + "55", background: e.tint },
+              "aria-label": `Add one set of ${e.id === "plank" ? fmtHold(q) + " plank" : q + " " + e.label.toLowerCase()}`
+            }, "+" + fmtPill(e.id, q))),
+            h("button", { onClick: () => setOpen(isOpen ? null : e.id), className: "pill-quick", style: { ...mono, color: "#4A524E", borderColor: "#D6DAD2", background: "#fff" }, "aria-expanded": isOpen }, isOpen ? "CLOSE" : "SETS\u00d7")),
+          isOpen && h("div", { className: "pill-custom" },
+            h("input", { type: "number", min: 1, max: 20, value: d(e.id).s, onChange: ev => setD(e.id, { s: ev.target.value }), "aria-label": "Sets", className: "pill-in", style: { ...mono, width: "3.2rem" } }),
+            h("span", { style: mono, className: "text-sm text-gray-500" }, "\u00d7"),
+            h("input", {
+              type: e.id === "plank" ? "text" : "number", inputMode: e.id === "plank" ? "text" : "numeric",
+              value: d(e.id).r, placeholder: e.id === "plank" ? "sec or m:ss" : "reps",
+              onChange: ev => setD(e.id, { r: ev.target.value }),
+              onKeyDown: ev => { if (ev.key === "Enter") submitDraft(e.id); },
+              "aria-label": e.id === "plank" ? "Hold per set, seconds or m:ss" : "Reps per set",
+              className: "pill-in", style: { ...mono, width: e.id === "plank" ? "7.5rem" : "4.5rem" }
+            }),
+            h("button", { onClick: () => submitDraft(e.id), className: "pill-quick", style: { ...mono, color: "#fff", background: e.color, borderColor: e.color } }, "ADD")),
+          sets.length > 0 && h("div", { className: "pill-chips" },
+            sets.map((x, i) => h("span", { key: i, className: "pill-chip", style: mono, title: x.t ? "logged " + x.t : "" },
+              pillEntryText(e.id, x),
+              h("button", { onClick: () => removeAt(e.id, i), className: "pill-x", "aria-label": `Remove ${pillEntryText(e.id, x)}` }, "\u00d7")))));
+      })));
+}
+
+/* ---------- Progress tab ---------- */
+function PillChart({ ex, data, target }) {
+  const h = React.createElement;
+  const max = Math.max(target, ...data.map(r => r[ex.id]), ...data.map(r => r[ex.id + "_avg"]));
+  let ticks;
+  if (ex.id === "plank") {
+    const step = max > 360 ? 120 : 60;
+    const top = Math.ceil((max * 1.1) / step) * step;
+    ticks = [];
+    for (let v = 0; v <= top; v += step) ticks.push(v);
+  }
+  return h("div", { style: { height: 190 } },
+    h(ResponsiveContainer, { width: "100%", height: "100%" },
+      h(ComposedChart, { data, margin: { top: 10, right: 8, left: -8, bottom: 0 } },
+        h(CartesianGrid, { stroke: "#EDEFE9", vertical: false }),
+        h(XAxis, { dataKey: "label", tick: { fontSize: 10, fontFamily: "monospace" }, interval: "preserveStartEnd", minTickGap: 18 }),
+        h(YAxis, {
+          tick: { fontSize: 10, fontFamily: "monospace" }, width: 46, allowDecimals: false,
+          domain: [0, ticks ? ticks[ticks.length - 1] : Math.ceil((max * 1.1) / 10) * 10], ticks,
+          tickFormatter: v => ex.id === "plank" ? fmtHold(v) : v
+        }),
+        h(Tooltip, {
+          formatter: (v, name) => [fmtPill(ex.id, v), name],
+          labelFormatter: (l, p) => p && p[0] ? fmtDate(p[0].payload.d) : l,
+          contentStyle: { fontFamily: "monospace", fontSize: 12 }
+        }),
+        h(ReferenceLine, { y: target, stroke: ex.color, strokeDasharray: "4 3", ifOverflow: "extendDomain",
+          label: { value: "target " + fmtPill(ex.id, target), position: "insideTopLeft", fontSize: 10, fill: ex.color, fontFamily: "monospace" } }),
+        h(Bar, { dataKey: ex.id, name: "Day total", radius: [3, 3, 0, 0], maxBarSize: 22, isAnimationActive: false },
+          data.map((r, i) => h(Cell, { key: i, fill: r[ex.id] >= target ? ex.color : ex.color + "5C" }))),
+        h(Line, { dataKey: ex.id + "_avg", name: "7-day average", stroke: "#1C2321", strokeWidth: 1.5, dot: false, type: "monotone", isAnimationActive: false }))));
+}
+
+function PillsView({ state, todayIso, setPillTargets, onGoDay }) {
+  const h = React.createElement;
+  const [range, setRange] = useState("4w");
+  const [editT, setEditT] = useState(null);
+  const targets = pillTargets(state);
+  const logs = state.logs || {};
+  const endIdx = Math.max(0, ALL_DAYS.findIndex(d => d.d === todayIso));
+  const pillDays = ALL_DAYS.slice(0, endIdx + 1).filter(d => logHasPills(logs[d.d])).map(d => d.d);
+  const firstIso = pillDays[0] || null;
+  const firstIdx = firstIso ? ALL_DAYS.findIndex(d => d.d === firstIso) : endIdx;
+  const span = { "2w": 14, "4w": 28, "12w": 84 }[range];
+  const startIdx = Math.max(0, range === "all" ? Math.min(firstIdx, endIdx - 13) : endIdx - span + 1);
+  const isoList = ALL_DAYS.slice(startIdx, endIdx + 1).map(d => d.d);
+  const data = pillSeries(state, isoList);
+  const todayRow = pillSeries(state, [todayIso])[0];
+
+  let streak = 0;
+  for (let k = logHasPills(logs[todayIso]) ? endIdx : endIdx - 1; k >= 0 && logHasPills(logs[ALL_DAYS[k].d]); k--) streak++;
+
+  /* weekly rollup (plan weeks, Mon-Sun), from the first pill week to this week */
+  const weeks = PLAN.weeks.filter(w => w.days[w.days.length - 1].d >= (firstIso || todayIso) && w.days[0].d <= todayIso).map(w => {
+    const days = w.days.filter(x => x.d <= todayIso);
+    const row = { n: w.n, from: w.days[0].d, to: w.days[w.days.length - 1].d, elapsed: days.length, active: 0, allMet: 0 };
+    PILL_EX.forEach(e => { row[e.id] = 0; row[e.id + "_met"] = 0; });
+    days.forEach(x => {
+      const l = logs[x.d];
+      if (logHasPills(l)) row.active++;
+      let met = 0;
+      PILL_EX.forEach(e => {
+        const t = pillTotal(l, e.id);
+        row[e.id] += t;
+        if (t >= targets[e.id]) { row[e.id + "_met"]++; met++; }
+      });
+      if (met === PILL_EX.length) row.allMet++;
+    });
+    return row;
+  }).reverse();
+  const tot = { elapsed: 0, active: 0, allMet: 0 };
+  PILL_EX.forEach(e => { tot[e.id] = 0; tot[e.id + "_met"] = 0; });
+  weeks.forEach(w => { ["elapsed", "active", "allMet"].forEach(k => tot[k] += w[k]); PILL_EX.forEach(e => { tot[e.id] += w[e.id]; tot[e.id + "_met"] += w[e.id + "_met"]; }); });
+  /* the overall average runs from the first pill day, not from the Monday of that week */
+  const daysSinceFirst = firstIso ? endIdx - firstIdx + 1 : 0;
+
+  const rangeBtn = (id, label) => h("button", {
+    key: id, onClick: () => setRange(id), "aria-pressed": range === id,
+    className: "px-2 py-1 rounded text-xs", style: { ...mono, background: range === id ? "#1C2321" : "transparent", color: range === id ? "#fff" : "#4A524E" }
+  }, label);
+  const th = (t, right) => h("th", { className: `${right ? "text-right" : "text-left"} py-2 px-2`, style: { fontWeight: 600 } }, t);
+  const cell = (e, total, elapsed, metDays) => h("td", { className: "py-1.5 px-2 text-right", style: { whiteSpace: "nowrap" } },
+    h("div", { style: { color: "#1C2321", fontWeight: 600 } }, fmtPill(e.id, total)),
+    h("div", { className: "text-xs text-gray-500" }, elapsed ? fmtPill(e.id, total / elapsed) + "/day" : "\u2014", " \u00b7 ", metDays, "\u2713"));
+
+  const targetsEditor = h("div", { className: "flex flex-wrap items-end gap-3 mt-3" },
+    PILL_EX.map(e => h(Field, {
+      key: e.id, label: e.label + (e.id === "plank" ? " (sec)" : ""), w: "w-20",
+      value: editT ? editT[e.id] : targets[e.id],
+      onChange: v => setEditT({ ...(editT || targets), [e.id]: v })
+    })),
+    editT && h("button", {
+      onClick: () => { const o = {}; PILL_EX.forEach(e => { o[e.id] = Math.max(1, Math.round(num(editT[e.id]))) || e.defTarget; }); setPillTargets(o); setEditT(null); },
+      className: "px-3 py-1.5 rounded text-xs text-white", style: { ...mono, background: "#1C2321" }
+    }, "SAVE TARGETS"),
+    editT && h("button", { onClick: () => setEditT(null), className: "px-3 py-1.5 rounded border text-xs", style: { ...mono, borderColor: "#D6DAD2" } }, "CANCEL"));
+
+  return h("div", { className: "space-y-4" },
+    h(Card, { className: "p-5" },
+      h("div", { className: "flex items-start justify-between gap-3 flex-wrap" },
+        h("div", null,
+          h(Eyebrow, { color: "#6C4AB6" }, "STRENGTH PILLS"),
+          h("div", { className: "text-lg font-bold mt-0.5" }, "Little and often, every day"),
+          h("div", { className: "text-sm text-gray-600 mt-1", style: { maxWidth: "38rem" } },
+            "Short bouts spread through the day instead of two long sessions a week. Log them on the Today tab.")),
+        h("div", { style: { textAlign: "right" } },
+          h("div", { className: "text-3xl font-bold", style: { ...mono, color: streak ? "#6C4AB6" : "#9AA6A0", lineHeight: 1 } }, streak),
+          h("div", { className: "text-xs text-gray-500", style: mono }, streak === 1 ? "day in a row" : "days in a row"))),
+      h("div", { className: "pill-summary" },
+        PILL_EX.map(e => {
+          const t = todayRow[e.id], avg = todayRow[e.id + "_avg"], tg = targets[e.id];
+          return h("div", { key: e.id, className: "pill-sum", style: { borderColor: e.color + "40", background: e.tint } },
+            h("div", { className: "text-xs font-semibold", style: { ...mono, color: e.color } }, e.label.toUpperCase()),
+            h("div", { className: "text-2xl font-bold mt-1", style: mono }, fmtPill(e.id, t),
+              h("span", { className: "text-sm text-gray-500 font-normal" }, " / ", fmtPill(e.id, tg))),
+            h("div", { className: "text-xs text-gray-600 mt-0.5", style: mono }, "today \u00b7 7-day avg ", fmtPill(e.id, avg)),
+            h("div", { className: "pill-bar" }, h("span", { style: { width: Math.min(100, (avg / tg) * 100) + "%", background: e.color } })));
+        })),
+      h("details", { className: "mt-3" },
+        h("summary", { className: "text-xs text-gray-500 cursor-pointer select-none", style: mono }, "DAILY TARGETS"),
+        targetsEditor)),
+
+    h(Card, { className: "p-5" },
+      h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+        h(Eyebrow, null, "DAILY PROGRESSION"),
+        h("div", { className: "flex gap-1 rounded p-0.5", style: { background: "#ECEEE8" } },
+          rangeBtn("2w", "2W"), rangeBtn("4w", "4W"), rangeBtn("12w", "12W"), rangeBtn("all", "ALL"))),
+      h("div", { className: "text-xs text-gray-500 mt-1" }, "Bars are daily totals, solid once the target is reached. The dark line is the 7-day average: the number that shows the habit forming."),
+      h("div", { className: "pill-charts" },
+        PILL_EX.map(e => h("div", { key: e.id },
+          h("div", { className: "text-sm font-semibold mb-1", style: { color: e.color } }, e.label),
+          h(PillChart, { ex: e, data, target: targets[e.id] }))))),
+
+    h(Card, { className: "p-5" },
+      h(Eyebrow, null, "WEEKLY TOTALS"),
+      !firstIso
+        ? h("div", { className: "text-sm text-gray-500 mt-3" }, "No pills logged yet. Add your first set on the Today tab and this table fills in week by week.")
+        : h("div", { className: "mt-2 overflow-x-auto" },
+          h("table", { className: "w-full text-sm", style: mono },
+            h("thead", null, h("tr", { className: "text-xs text-gray-500 border-b", style: { borderColor: "#EDEFE9" } },
+              th("Week"), PILL_EX.map(e => h(React.Fragment, { key: e.id }, th(e.label, true))), th("Days", true), th("All 3", true))),
+            h("tbody", null, weeks.map(w => h("tr", {
+              key: w.n, className: "border-b pill-week", style: { borderColor: "#F3F4EF", cursor: "pointer" },
+              onClick: () => onGoDay(w.from), title: "Open this week on the Today tab"
+            },
+              h("td", { className: "py-1.5 px-2", style: { whiteSpace: "nowrap" } },
+                h("div", { style: { fontWeight: 600 } }, "W", w.n),
+                h("div", { className: "text-xs text-gray-500" }, fromIso(w.from).toLocaleDateString("en-GB", { day: "numeric", month: "short" }), "\u2013", fromIso(w.to).toLocaleDateString("en-GB", { day: "numeric", month: "short" }))),
+              PILL_EX.map(e => h(React.Fragment, { key: e.id }, cell(e, w[e.id], w.elapsed, w[e.id + "_met"]))),
+              h("td", { className: "py-1.5 px-2 text-right" }, w.active, "/", w.elapsed),
+              h("td", { className: "py-1.5 px-2 text-right" }, w.allMet)))),
+            h("tfoot", null, h("tr", { style: { borderTop: "2px solid #1C2321" } },
+              h("td", { className: "py-2 px-2", style: { fontWeight: 700 } }, "Total",
+                h("div", { className: "text-xs text-gray-500", style: { fontWeight: 400 } }, "since ", fromIso(firstIso).toLocaleDateString("en-GB", { day: "numeric", month: "short" }))),
+              PILL_EX.map(e => h(React.Fragment, { key: e.id }, cell(e, tot[e.id], daysSinceFirst, tot[e.id + "_met"]))),
+              h("td", { className: "py-2 px-2 text-right" }, tot.active, "/", daysSinceFirst),
+              h("td", { className: "py-2 px-2 text-right" }, tot.allMet))))),
+      firstIso && h("div", { className: "text-xs text-gray-500 mt-2" }, "Under each total: average per day in that week, and \u2713 = days that exercise hit its target. Click a week to open it.")));
+}
 
 /* ================= INJURY CARD (Today) =================
    Flag the day as injured: where, which side, pain 0-10, and which kinds of
