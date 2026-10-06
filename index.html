@@ -51,13 +51,14 @@ html, body { margin: 0; background: #F7F8F5; }
 .pill-chip{display:inline-flex;align-items:center;gap:.15rem;padding:.1rem .15rem .1rem .5rem;border-radius:999px;background:#F2F3EF;font-size:.75rem;color:#4A524E}
 .pill-x{width:1.25rem;height:1.25rem;border-radius:999px;color:#6B7472;font-size:.85rem;line-height:1}
 .pill-x:hover{background:#E3E6E0;color:#B3272D}
-.pill-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem;margin-top:1rem}
+.pill-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;margin-top:1rem}
 .pill-sum{border:1px solid;border-radius:.5rem;padding:.75rem .85rem}
 .pill-bar{height:4px;border-radius:999px;background:#fff;margin-top:.5rem;overflow:hidden}
 .pill-bar span{display:block;height:100%;border-radius:999px}
-.pill-charts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.75rem}
+.pill-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-top:.75rem}
 .pill-week:hover{background:#F7F8F5}
 @media (max-width:900px){.pill-charts{grid-template-columns:1fr}}
+@media (max-width:900px){.pill-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.pill-summary{grid-template-columns:1fr}}
 
 #boot { min-height: 100vh; display: flex; align-items: center; justify-content: center;
@@ -5299,15 +5300,18 @@ function App() {
 
 /* ================= STRENGTH PILLS =================
    Short bodyweight "pills" logged through the day instead of long sessions.
-   Stored per day as log.pills = { pushups: [{s, r, t}], plank: [...], squats: [...] }
-   where s = sets, r = reps per set (plank: seconds per hold), t = time logged.
+   Stored per day as log.pills = { pushups: [{s, r, t}], plank: [...], squats: [...], hang: [...] }
+   where s = sets, r = reps per set (timed holds - plank, bar hang: seconds per hold), t = time logged.
    Anything logged counts as the day's flag for that exercise; the totals are
    the intensity. Targets live in state.pillTargets and ride the same sync. */
 const PILL_EX = [
   { id: "pushups", label: "Push-ups", unit: "reps", color: "#6C4AB6", tint: "#EFEAF8", quick: [10, 15, 20, 25], defTarget: 50 },
   { id: "plank",   label: "Plank",    unit: "sec",  color: "#3B7E9E", tint: "#E4F0F4", quick: [30, 45, 60, 90], defTarget: 180 },
-  { id: "squats",  label: "Squats",   unit: "reps", color: "#B35F1E", tint: "#F8EDE2", quick: [15, 20, 25, 30], defTarget: 100 }
+  { id: "squats",  label: "Squats",   unit: "reps", color: "#B35F1E", tint: "#F8EDE2", quick: [15, 20, 25, 30], defTarget: 100 },
+  { id: "hang",    label: "Bar hang", unit: "sec",  color: "#3F7D4E", tint: "#E6F1E8", quick: [15, 20, 30, 45], defTarget: 60 }
 ];
+/* Timed exercises (holds) are logged and shown in seconds rather than reps. */
+const isTimedPill = id => { const e = PILL_EX.find(x => x.id === id); return !!(e && e.unit === "sec"); };
 const pillTargets = state => {
   const t = (state && state.pillTargets) || {};
   const o = {};
@@ -5325,7 +5329,7 @@ const fmtHold = sec => {
   if (!m) return `${s}"`;
   return s ? `${m}'${pad(s)}"` : `${m}'`;
 };
-const fmtPill = (id, v) => id === "plank" ? fmtHold(v) : String(Math.round(num(v)));
+const fmtPill = (id, v) => isTimedPill(id) ? fmtHold(v) : String(Math.round(num(v)));
 /* "90", "90s", "90\"" -> 90 s;  "1:30", "1'30", "3'" -> minutes:seconds */
 const parseHold = str => {
   const s = String(str == null ? "" : str).trim();
@@ -5381,9 +5385,9 @@ function PillsCard({ activeIso, todayIso, log, state, patchDay, onOpen }) {
   const setD = (id, p) => setDraft({ ...draft, [id]: { ...d(id), ...p } });
   const submitDraft = id => {
     const cur = d(id);
-    const r = id === "plank" ? parseHold(cur.r) : num(cur.r);
+    const r = isTimedPill(id) ? parseHold(cur.r) : num(cur.r);
     if (!(r > 0)) return;
-    add(id, cur.s, id === "plank" ? Math.min(r, 900) : Math.min(r, 500));
+    add(id, cur.s, isTimedPill(id) ? Math.min(r, 900) : Math.min(r, 500));
     setD(id, { r: "" });
   };
   const metCount = PILL_EX.filter(e => pillTotal(log, e.id) >= targets[e.id]).length;
@@ -5400,7 +5404,7 @@ function PillsCard({ activeIso, todayIso, log, state, patchDay, onOpen }) {
 
   return h(Card, { className: "p-5" },
     h("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
-      h(Eyebrow, { color: "#6C4AB6" }, "STRENGTH PILLS \u00b7 ", metCount, "/3 TARGETS"),
+      h(Eyebrow, { color: "#6C4AB6" }, "STRENGTH PILLS \u00b7 ", metCount, "/" + PILL_EX.length + " TARGETS"),
       h("button", { onClick: onOpen, className: "text-xs px-2 py-1 rounded border", style: { ...mono, borderColor: "#D6DAD2", background: "#fff" } }, "PROGRESS")),
     h("div", { className: "text-xs text-gray-500 mt-1" }, "Log each short bout as you do it. Tap a quick amount for one set, or enter sets \u00d7 amount."),
     h("div", { className: "pill-rows" },
@@ -5426,19 +5430,19 @@ function PillsCard({ activeIso, todayIso, log, state, patchDay, onOpen }) {
             e.quick.map(q => h("button", {
               key: q, onClick: () => add(e.id, 1, q), className: "pill-quick",
               style: { ...mono, color: e.color, borderColor: e.color + "55", background: e.tint },
-              "aria-label": `Add one set of ${e.id === "plank" ? fmtHold(q) + " plank" : q + " " + e.label.toLowerCase()}`
+              "aria-label": `Add one set of ${isTimedPill(e.id) ? fmtHold(q) + " " + e.label.toLowerCase() : q + " " + e.label.toLowerCase()}`
             }, "+" + fmtPill(e.id, q))),
             h("button", { onClick: () => setOpen(isOpen ? null : e.id), className: "pill-quick", style: { ...mono, color: "#4A524E", borderColor: "#D6DAD2", background: "#fff" }, "aria-expanded": isOpen }, isOpen ? "CLOSE" : "SETS\u00d7")),
           isOpen && h("div", { className: "pill-custom" },
             h("input", { type: "number", min: 1, max: 20, value: d(e.id).s, onChange: ev => setD(e.id, { s: ev.target.value }), "aria-label": "Sets", className: "pill-in", style: { ...mono, width: "3.2rem" } }),
             h("span", { style: mono, className: "text-sm text-gray-500" }, "\u00d7"),
             h("input", {
-              type: e.id === "plank" ? "text" : "number", inputMode: e.id === "plank" ? "text" : "numeric",
-              value: d(e.id).r, placeholder: e.id === "plank" ? "sec or m:ss" : "reps",
+              type: isTimedPill(e.id) ? "text" : "number", inputMode: isTimedPill(e.id) ? "text" : "numeric",
+              value: d(e.id).r, placeholder: isTimedPill(e.id) ? "sec or m:ss" : "reps",
               onChange: ev => setD(e.id, { r: ev.target.value }),
               onKeyDown: ev => { if (ev.key === "Enter") submitDraft(e.id); },
-              "aria-label": e.id === "plank" ? "Hold per set, seconds or m:ss" : "Reps per set",
-              className: "pill-in", style: { ...mono, width: e.id === "plank" ? "7.5rem" : "4.5rem" }
+              "aria-label": isTimedPill(e.id) ? "Hold per set, seconds or m:ss" : "Reps per set",
+              className: "pill-in", style: { ...mono, width: isTimedPill(e.id) ? "7.5rem" : "4.5rem" }
             }),
             h("button", { onClick: () => submitDraft(e.id), className: "pill-quick", style: { ...mono, color: "#fff", background: e.color, borderColor: e.color } }, "ADD")),
           sets.length > 0 && h("div", { className: "pill-chips" },
@@ -5453,8 +5457,8 @@ function PillChart({ ex, data, target }) {
   const h = React.createElement;
   const max = Math.max(target, ...data.map(r => r[ex.id]), ...data.map(r => r[ex.id + "_avg"]));
   let ticks;
-  if (ex.id === "plank") {
-    const step = max > 360 ? 120 : 60;
+  if (isTimedPill(ex.id)) {
+    const step = max > 360 ? 120 : max > 150 ? 60 : 30;
     const top = Math.ceil((max * 1.1) / step) * step;
     ticks = [];
     for (let v = 0; v <= top; v += step) ticks.push(v);
@@ -5467,7 +5471,7 @@ function PillChart({ ex, data, target }) {
         h(YAxis, {
           tick: { fontSize: 10, fontFamily: "monospace" }, width: 46, allowDecimals: false,
           domain: [0, ticks ? ticks[ticks.length - 1] : Math.ceil((max * 1.1) / 10) * 10], ticks,
-          tickFormatter: v => ex.id === "plank" ? fmtHold(v) : v
+          tickFormatter: v => isTimedPill(ex.id) ? fmtHold(v) : v
         }),
         h(Tooltip, {
           formatter: (v, name) => [fmtPill(ex.id, v), name],
@@ -5535,7 +5539,7 @@ function PillsView({ state, todayIso, setPillTargets, onGoDay }) {
 
   const targetsEditor = h("div", { className: "flex flex-wrap items-end gap-3 mt-3" },
     PILL_EX.map(e => h(Field, {
-      key: e.id, label: e.label + (e.id === "plank" ? " (sec)" : ""), w: "w-20",
+      key: e.id, label: e.label + (isTimedPill(e.id) ? " (sec)" : ""), w: "w-20",
       value: editT ? editT[e.id] : targets[e.id],
       onChange: v => setEditT({ ...(editT || targets), [e.id]: v })
     })),
@@ -5588,7 +5592,7 @@ function PillsView({ state, todayIso, setPillTargets, onGoDay }) {
         : h("div", { className: "mt-2 overflow-x-auto" },
           h("table", { className: "w-full text-sm", style: mono },
             h("thead", null, h("tr", { className: "text-xs text-gray-500 border-b", style: { borderColor: "#EDEFE9" } },
-              th("Week"), PILL_EX.map(e => h(React.Fragment, { key: e.id }, th(e.label, true))), th("Days", true), th("All 3", true))),
+              th("Week"), PILL_EX.map(e => h(React.Fragment, { key: e.id }, th(e.label, true))), th("Days", true), th("All " + PILL_EX.length, true))),
             h("tbody", null, weeks.map(w => h("tr", {
               key: w.n, className: "border-b pill-week", style: { borderColor: "#F3F4EF", cursor: "pointer" },
               onClick: () => onGoDay(w.from), title: "Open this week on the Today tab"
